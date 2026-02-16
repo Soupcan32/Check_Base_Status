@@ -30,7 +30,6 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logger = logging.getLogger("bumpix-bot")
 
-BUMPIX_URL = "https://bumpix.net/soundlevel"
 TOKEN = "PASTE_YOUR_NEW_TOKEN_HERE"   # <-- вставь новый токен
 HEADLESS = True
 
@@ -41,6 +40,11 @@ CHROMEDRIVER_PATH = ChromeDriverManager().install()
 CHROME_SERVICE = Service(CHROMEDRIVER_PATH)
 
 SEL_PICKER_CALENDAR = "div.picker_calendar"
+
+ROOMS = {
+    "grey": {"title": "⚪ Серая комната", "url": "https://bumpix.net/soundlevel"},
+    "blue": {"title": "🔵 Синяя комната", "url": "https://bumpix.net/500141"},
+}
 
 
 # ---------------- telegram helpers ----------------
@@ -80,8 +84,8 @@ def make_driver(headless=True):
     driver.set_page_load_timeout(25)
     return driver
 
-def open_page(driver):
-    driver.get(BUMPIX_URL)
+def open_page(driver, url: str):
+    driver.get(url)
     WebDriverWait(driver, 20, poll_frequency=WAIT_POLL).until(
         EC.presence_of_element_located((By.TAG_NAME, "body"))
     )
@@ -282,8 +286,8 @@ class ServiceItem:
     sid: str
     title: str
 
-def bumpix_get_services_with_driver(driver):
-    open_page(driver)
+def bumpix_get_services_with_driver(driver, url: str):
+    open_page(driver, url)
 
     WebDriverWait(driver, 15, poll_frequency=WAIT_POLL).until(
         lambda d: (d.execute_script(
@@ -587,8 +591,8 @@ class TimesResult:
     times: list[str]
     error: str | None = None
 
-def get_times_for_selection(driver, sids, day_offset: int) -> TimesResult:
-    open_page(driver)
+def get_times_for_selection(driver, url: str, sids, day_offset: int) -> TimesResult:
+    open_page(driver, url)
 
     select_services(driver, sids)
 
@@ -639,8 +643,10 @@ class BumpixWorker:
     def __init__(self):
         self.lock = RLock()
         self.driver = None
-        self.services_cache = []
-        self.services_cache_ts = 0.0
+
+        # cache per room-url
+        self.services_cache_by_url: dict[str, list[ServiceItem]] = {}
+        self.services_cache_ts_by_url: dict[str, float] = {}
         self.services_ttl = 10 * 60
 
     def _ensure_driver(self):
@@ -655,34 +661,37 @@ class BumpixWorker:
             pass
         self.driver = None
 
-    def get_services(self):
+    def get_services(self, url: str):
         with self.lock:
             self._ensure_driver()
+
             now = time.time()
-            if self.services_cache and (now - self.services_cache_ts) < self.services_ttl:
-                return list(self.services_cache)
+            cached = self.services_cache_by_url.get(url)
+            ts = self.services_cache_ts_by_url.get(url, 0.0)
+            if cached and (now - ts) < self.services_ttl:
+                return list(cached)
 
             try:
-                services = bumpix_get_services_with_driver(self.driver)
+                services = bumpix_get_services_with_driver(self.driver, url)
             except (WebDriverException, StaleElementReferenceException):
                 self._reset_driver()
                 self._ensure_driver()
-                services = bumpix_get_services_with_driver(self.driver)
+                services = bumpix_get_services_with_driver(self.driver, url)
 
-            self.services_cache = list(services)
-            self.services_cache_ts = time.time()
+            self.services_cache_by_url[url] = list(services)
+            self.services_cache_ts_by_url[url] = time.time()
             return services
 
-    def get_times(self, sids, day_offset: int) -> TimesResult:
+    def get_times(self, url: str, sids, day_offset: int) -> TimesResult:
         with self.lock:
             self._ensure_driver()
             try:
-                return get_times_for_selection(self.driver, sids, day_offset)
+                return get_times_for_selection(self.driver, url, sids, day_offset)
             except (WebDriverException, StaleElementReferenceException) as e:
                 self._reset_driver()
                 self._ensure_driver()
                 try:
-                    return get_times_for_selection(self.driver, sids, day_offset)
+                    return get_times_for_selection(self.driver, url, sids, day_offset)
                 except Exception as e2:
                     return TimesResult(status="ERROR", times=[], error=str(e2) or str(e))
 
@@ -694,7 +703,13 @@ WORKER = BumpixWorker()
 
 PAGE_SIZE = 20
 
-def services_keyboard(services, selected_idx_set, page: int):
+def room_keyboard():
+    return kb([
+        [InlineKeyboardButton(ROOMS["grey"]["title"], callback_data="room:grey")],
+        [InlineKeyboardButton(ROOMS["blue"]["title"], callback_data="room:blue")],
+    ])
+
+def services_keyboard(services, selected_idx_set, page: int, room_key: str):
     total = len(services)
     pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
     page = max(0, min(page, pages - 1))
@@ -708,7 +723,7 @@ def services_keyboard(services, selected_idx_set, page: int):
         mark = "✅ " if i in selected_idx_set else "☐ "
         rows.append([InlineKeyboardButton((mark + s.title)[:60], callback_data=f"tgl:{i}")])
 
-    # FIX: убрали кнопку "1/1" (индикатор страницы)
+    # без кнопки "1/1"
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton("⬅️", callback_data=f"pg:{page-1}"))
@@ -721,23 +736,44 @@ def services_keyboard(services, selected_idx_set, page: int):
         InlineKeyboardButton("✅ Далее", callback_data="next"),
         InlineKeyboardButton("🧹 Сброс", callback_data="reset"),
     ])
+    rows.append([InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")])
     return kb(rows)
 
+def days_keyboard(room_key: str):
+    return kb([
+        [InlineKeyboardButton("Сегодня", callback_data="day:0")],
+        [InlineKeyboardButton("Завтра", callback_data="day:1")],
+        [InlineKeyboardButton("Послезавтра", callback_data="day:2")],
+        [InlineKeyboardButton("↩️ Назад к услугам", callback_data=f"room:{room_key}")],
+        [InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")],
+    ])
+
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Нажмите кнопку:",
-        reply_markup=kb([[InlineKeyboardButton("⚪ Серая комната", callback_data="room:grey")]])
-    )
+    await update.message.reply_text("Выберите комнату:", reply_markup=room_keyboard())
 
 async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await safe_answer(q)
     data = q.data or ""
 
-    if data == "room:grey":
+    if data == "rooms":
+        context.user_data.clear()
+        await q.edit_message_text("Выберите комнату:", reply_markup=room_keyboard())
+        return
+
+    if data.startswith("room:"):
+        room_key = data.split("room:", 1)[1]
+        if room_key not in ROOMS:
+            await q.edit_message_text("Неизвестная комната.", reply_markup=room_keyboard())
+            return
+
+        url = ROOMS[room_key]["url"]
+        context.user_data["room_key"] = room_key
+        context.user_data["room_url"] = url
+
         await q.edit_message_text("Загружаю услуги…")
         loop = asyncio.get_running_loop()
-        services = await loop.run_in_executor(EXECUTOR, WORKER.get_services)
+        services = await loop.run_in_executor(EXECUTOR, lambda: WORKER.get_services(url))
 
         context.user_data["services"] = services
         context.user_data["sel"] = set()
@@ -746,22 +782,24 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not services:
             await q.edit_message_text(
                 "Не удалось получить список услуг. Попробуйте ещё раз.",
-                reply_markup=kb([[InlineKeyboardButton("🔄 Обновить", callback_data="room:grey")]])
+                reply_markup=kb([
+                    [InlineKeyboardButton("🔄 Обновить", callback_data=f"room:{room_key}")],
+                    [InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")]
+                ])
             )
             return
 
         await q.edit_message_text(
-            "Выберите одну или несколько услуг:",
-            reply_markup=services_keyboard(services, context.user_data["sel"], 0)
+            f"{ROOMS[room_key]['title']}\n\nВыберите одну или несколько услуг:",
+            reply_markup=services_keyboard(services, context.user_data["sel"], 0, room_key)
         )
         return
 
     if data.startswith("pg:"):
         services = context.user_data.get("services", [])
+        room_key = context.user_data.get("room_key", "grey")
         if not services:
-            await q.edit_message_text("Список услуг пуст.", reply_markup=kb([
-                [InlineKeyboardButton("🔄 Обновить", callback_data="room:grey")]
-            ]))
+            await q.edit_message_text("Список услуг пуст.", reply_markup=room_keyboard())
             return
 
         page = int(data.split("pg:", 1)[1])
@@ -769,13 +807,14 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sel = context.user_data.get("sel", set())
 
         await q.edit_message_text(
-            f"Выбрано услуг: {len(sel)}",
-            reply_markup=services_keyboard(services, sel, page)
+            f"{ROOMS[room_key]['title']}\n\nВыбрано услуг: {len(sel)}",
+            reply_markup=services_keyboard(services, sel, page, room_key)
         )
         return
 
     if data.startswith("tgl:"):
         services = context.user_data.get("services", [])
+        room_key = context.user_data.get("room_key", "grey")
         if not services:
             return
 
@@ -787,27 +826,29 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sel.add(i)
 
         await q.edit_message_text(
-            f"Выбрано услуг: {len(sel)}",
-            reply_markup=services_keyboard(services, sel, context.user_data.get("page", 0))
+            f"{ROOMS[room_key]['title']}\n\nВыбрано услуг: {len(sel)}",
+            reply_markup=services_keyboard(services, sel, context.user_data.get("page", 0), room_key)
         )
         return
 
     if data == "reset":
         services = context.user_data.get("services", [])
+        room_key = context.user_data.get("room_key", "grey")
         context.user_data["sel"] = set()
         await q.edit_message_text(
-            "Выберите одну или несколько услуг:",
-            reply_markup=services_keyboard(services, context.user_data["sel"], context.user_data.get("page", 0))
+            f"{ROOMS[room_key]['title']}\n\nВыберите одну или несколько услуг:",
+            reply_markup=services_keyboard(services, context.user_data["sel"], context.user_data.get("page", 0), room_key)
         )
         return
 
     if data == "next":
         services = context.user_data.get("services", [])
         sel = context.user_data.get("sel", set())
+        room_key = context.user_data.get("room_key", "grey")
         if not sel:
             await q.edit_message_text(
                 "Выберите хотя бы одну услугу.",
-                reply_markup=services_keyboard(services, sel, context.user_data.get("page", 0))
+                reply_markup=services_keyboard(services, sel, context.user_data.get("page", 0), room_key)
             )
             return
 
@@ -816,45 +857,40 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["sids"] = sids
         context.user_data["titles"] = titles
 
-        await q.edit_message_text("Выберите день:", reply_markup=kb([
-            [InlineKeyboardButton("Сегодня", callback_data="day:0")],
-            [InlineKeyboardButton("Завтра", callback_data="day:1")],
-            [InlineKeyboardButton("Послезавтра", callback_data="day:2")],
-            [InlineKeyboardButton("↩️ Назад к услугам", callback_data="room:grey")]
-        ]))
+        await q.edit_message_text("Выберите день:", reply_markup=days_keyboard(room_key))
         return
 
     if data.startswith("day:"):
+        room_key = context.user_data.get("room_key")
+        url = context.user_data.get("room_url")
         sids = context.user_data.get("sids", [])
         titles = context.user_data.get("titles", [])
-        if not sids:
-            await q.edit_message_text(
-                "Сначала выберите услуги.",
-                reply_markup=kb([[InlineKeyboardButton("↩️ К услугам", callback_data="room:grey")]])
-            )
+        if not room_key or not url or not sids:
+            await q.edit_message_text("Сначала выберите комнату и услуги.", reply_markup=room_keyboard())
             return
 
         day_offset = int(data.split("day:", 1)[1])
         await q.edit_message_text("Ищу свободные слоты…")
 
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(EXECUTOR, lambda: WORKER.get_times(sids, day_offset))
+        result = await loop.run_in_executor(EXECUTOR, lambda: WORKER.get_times(url, sids, day_offset))
 
         header = " + ".join(titles[:2])
         if len(titles) > 2:
             header += f" (+{len(titles)-2} ещё)"
 
         if result.status == "OK" and result.times:
-            text = f"{header}\n\nСвободное время (+{day_offset} дн.):\n" + "\n".join(result.times[:30])
+            text = f"{ROOMS[room_key]['title']}\n{header}\n\nСвободное время (+{day_offset} дн.):\n" + "\n".join(result.times[:30])
         elif result.status == "EMPTY":
-            text = f"{header}\n\nНет свободных слотов."
+            text = f"{ROOMS[room_key]['title']}\n{header}\n\nНет свободных слотов."
         else:
             msg = result.error or "Не удалось получить актуальные слоты. Попробуйте ещё раз."
-            text = f"{header}\n\n{msg}"
+            text = f"{ROOMS[room_key]['title']}\n{header}\n\n{msg}"
 
         await q.edit_message_text(text, reply_markup=kb([
             [InlineKeyboardButton("🔄 Обновить", callback_data=f"day:{day_offset}")],
-            [InlineKeyboardButton("↩️ Услуги", callback_data="room:grey")]
+            [InlineKeyboardButton("↩️ Услуги", callback_data=f"room:{room_key}")],
+            [InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")],
         ]))
         return
 
@@ -862,7 +898,7 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.exception("Unhandled error: %s", context.error)
 
 def main():
-    app = Application.builder().token("TOKEN").build()
+    app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CallbackQueryHandler(cb))
     app.add_error_handler(on_error)
@@ -870,4 +906,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
