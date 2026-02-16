@@ -862,7 +862,7 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.exception("Unhandled error: %s", context.error)
 
 def main():
-    app = Application.builder().token("8451375652:AAE-h1hS5uCE7qSvxzSSBSRMW3s2_pbUu3Y").build()
+    app = Application.builder().token("TOKEN").build()
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CallbackQueryHandler(cb))
     app.add_error_handler(on_error)
@@ -870,3 +870,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
