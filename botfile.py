@@ -42,8 +42,9 @@ CHROME_SERVICE = Service(CHROMEDRIVER_PATH)
 SEL_PICKER_CALENDAR = "div.picker_calendar"
 
 ROOMS = {
-    "grey": {"title": "⚪ Серая комната", "url": "https://bumpix.net/soundlevel"},
-    "blue": {"title": "🔵 Синяя комната", "url": "https://bumpix.net/500141"},
+    "grey":  {"title": "⚪ Серая комната",  "url": "https://bumpix.net/soundlevel"},
+    "blue":  {"title": "🔵 Синяя комната",  "url": "https://bumpix.net/500141"},
+    "green": {"title": "🟢 Зелёная комната", "url": "https://bumpix.net/517424"},
 }
 
 
@@ -71,10 +72,8 @@ def make_driver(headless=True):
     opts.add_argument("--window-size=1400,1000")
     opts.add_argument("--disable-blink-features=AutomationControlled")
 
-    # speed: disable images
     opts.add_experimental_option("prefs", {"profile.managed_default_content_settings.images": 2})
 
-    # speed: don't wait for all resources
     try:
         opts.page_load_strategy = "eager"
     except Exception:
@@ -597,7 +596,9 @@ def get_times_for_selection(driver, url: str, sids, day_offset: int) -> TimesRes
     select_services(driver, sids)
 
     click_choose_time(driver, timeout=18)
-    wait_calendar_visible(driver, timeout=12)
+    WebDriverWait(driver, 12, poll_frequency=WAIT_POLL).until(
+        EC.visibility_of_element_located((By.CSS_SELECTOR, SEL_PICKER_CALENDAR))
+    )
 
     for attempt in range(5):
         click_day(driver, day_offset)
@@ -644,7 +645,6 @@ class BumpixWorker:
         self.lock = RLock()
         self.driver = None
 
-        # cache per room-url
         self.services_cache_by_url: dict[str, list[ServiceItem]] = {}
         self.services_cache_ts_by_url: dict[str, float] = {}
         self.services_ttl = 10 * 60
@@ -699,7 +699,7 @@ class BumpixWorker:
 WORKER = BumpixWorker()
 
 
-# ---------------- Bot UI (multi-select + pagination) ----------------
+# ---------------- Bot UI ----------------
 
 PAGE_SIZE = 20
 
@@ -707,6 +707,7 @@ def room_keyboard():
     return kb([
         [InlineKeyboardButton(ROOMS["grey"]["title"], callback_data="room:grey")],
         [InlineKeyboardButton(ROOMS["blue"]["title"], callback_data="room:blue")],
+        [InlineKeyboardButton(ROOMS["green"]["title"], callback_data="room:green")],
     ])
 
 def services_keyboard(services, selected_idx_set, page: int, room_key: str):
@@ -723,7 +724,6 @@ def services_keyboard(services, selected_idx_set, page: int, room_key: str):
         mark = "✅ " if i in selected_idx_set else "☐ "
         rows.append([InlineKeyboardButton((mark + s.title)[:60], callback_data=f"tgl:{i}")])
 
-    # без кнопки "1/1"
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton("⬅️", callback_data=f"pg:{page-1}"))
