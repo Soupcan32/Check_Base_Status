@@ -9,7 +9,14 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import RLock
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 from telegram.error import BadRequest
 
 from selenium import webdriver
@@ -33,6 +40,9 @@ logger = logging.getLogger("bumpix-bot")
 TOKEN = "PASTE_YOUR_NEW_TOKEN_HERE"   # <-- вставь новый токен
 HEADLESS = True
 
+# <-- ВАЖНО: сюда свой chat_id (твой личный id или id группы, куда бот может писать)
+ADMIN_CHAT_ID = 125030638  # например 123456789
+
 WAIT_POLL = 0.1
 EXECUTOR = ThreadPoolExecutor(max_workers=1)
 
@@ -42,8 +52,8 @@ CHROME_SERVICE = Service(CHROMEDRIVER_PATH)
 SEL_PICKER_CALENDAR = "div.picker_calendar"
 
 ROOMS = {
-    "grey":  {"title": "⚪ Серая комната",  "url": "https://bumpix.net/soundlevel"},
-    "blue":  {"title": "🔵 Синяя комната",  "url": "https://bumpix.net/500141"},
+    "grey":  {"title": "⚪ Серая комната",   "url": "https://bumpix.net/soundlevel"},
+    "blue":  {"title": "🔵 Синяя комната",   "url": "https://bumpix.net/500141"},
     "green": {"title": "🟢 Зелёная комната", "url": "https://bumpix.net/517424"},
 }
 
@@ -58,6 +68,100 @@ async def safe_answer(q):
         await q.answer()
     except BadRequest:
         pass
+
+
+# ---------------- feedback feature ----------------
+
+def feedback_keyboard():
+    return kb([
+        [InlineKeyboardButton("❌ Отмена", callback_data="feedback_cancel")],
+        [InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")],
+    ])
+
+async def feedback_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["feedback_mode"] = True
+    txt = (
+        "Напиши сообщение автору бота (можно текст, фото или файл).\n\n"
+        "После отправки я перешлю это автору и выйду из режима обратной связи."
+    )
+    if update.message:
+        await update.message.reply_text(txt, reply_markup=feedback_keyboard())
+    elif update.callback_query:
+        await update.callback_query.edit_message_text(txt, reply_markup=feedback_keyboard())
+
+async def feedback_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["feedback_mode"] = False
+    if update.callback_query:
+        await update.callback_query.edit_message_text("Отменено. Выберите комнату:", reply_markup=room_keyboard())
+    elif update.message:
+        await update.message.reply_text("Отменено. Выберите комнату:", reply_markup=room_keyboard())
+
+async def feedback_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("feedback_mode"):
+        return
+
+    if not ADMIN_CHAT_ID:
+        context.user_data["feedback_mode"] = False
+        await update.message.reply_text(
+            "У автора бота не настроен ADMIN_CHAT_ID, поэтому я не могу переслать сообщение.",
+            reply_markup=room_keyboard()
+        )
+        return
+
+    user = update.effective_user
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    username = f"@{user.username}" if user and user.username else "-"
+    full_name = user.full_name if user else "-"
+    user_id = user.id if user else "-"
+
+    header = (
+        "📩 Обратная связь\n"
+        f"Время: {now}\n"
+        f"От: {full_name}\n"
+        f"Username: {username}\n"
+        f"user_id: {user_id}\n"
+    )
+
+    msg = update.message
+
+    try:
+        # Текст
+        if msg.text and not msg.text.startswith("/"):
+            await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=header + "\n" + msg.text)
+
+        # Фото (берём максимальный размер)
+        elif msg.photo:
+            photo = msg.photo[-1]
+            cap = header
+            if msg.caption:
+                cap += "\n" + msg.caption
+            await context.bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=photo.file_id, caption=cap[:1024])
+
+        # Документ/файл
+        elif msg.document:
+            cap = header
+            if msg.caption:
+                cap += "\n" + msg.caption
+            await context.bot.send_document(chat_id=ADMIN_CHAT_ID, document=msg.document.file_id, caption=cap[:1024])
+
+        else:
+            await msg.reply_text(
+                "Пожалуйста, отправь текст, фото или файл.",
+                reply_markup=feedback_keyboard()
+            )
+            return
+
+        context.user_data["feedback_mode"] = False
+        await msg.reply_text("Спасибо! Я переслал сообщение автору.", reply_markup=room_keyboard())
+
+    except Exception as e:
+        logger.exception("feedback send failed: %s", e)
+        context.user_data["feedback_mode"] = False
+        await msg.reply_text(
+            "Не удалось переслать сообщение автору (ошибка отправки). Попробуйте позже.",
+            reply_markup=room_keyboard()
+        )
 
 
 # ---------------- selenium helpers ----------------
@@ -596,9 +700,7 @@ def get_times_for_selection(driver, url: str, sids, day_offset: int) -> TimesRes
     select_services(driver, sids)
 
     click_choose_time(driver, timeout=18)
-    WebDriverWait(driver, 12, poll_frequency=WAIT_POLL).until(
-        EC.visibility_of_element_located((By.CSS_SELECTOR, SEL_PICKER_CALENDAR))
-    )
+    wait_calendar_visible(driver, timeout=12)
 
     for attempt in range(5):
         click_day(driver, day_offset)
@@ -708,6 +810,7 @@ def room_keyboard():
         [InlineKeyboardButton(ROOMS["grey"]["title"], callback_data="room:grey")],
         [InlineKeyboardButton(ROOMS["blue"]["title"], callback_data="room:blue")],
         [InlineKeyboardButton(ROOMS["green"]["title"], callback_data="room:green")],
+        [InlineKeyboardButton("✉️ Обратная связь", callback_data="feedback")],
     ])
 
 def services_keyboard(services, selected_idx_set, page: int, room_key: str):
@@ -737,6 +840,7 @@ def services_keyboard(services, selected_idx_set, page: int, room_key: str):
         InlineKeyboardButton("🧹 Сброс", callback_data="reset"),
     ])
     rows.append([InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")])
+    rows.append([InlineKeyboardButton("✉️ Обратная связь", callback_data="feedback")])
     return kb(rows)
 
 def days_keyboard(room_key: str):
@@ -746,15 +850,27 @@ def days_keyboard(room_key: str):
         [InlineKeyboardButton("Послезавтра", callback_data="day:2")],
         [InlineKeyboardButton("↩️ Назад к услугам", callback_data=f"room:{room_key}")],
         [InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")],
+        [InlineKeyboardButton("✉️ Обратная связь", callback_data="feedback")],
     ])
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Выберите комнату:", reply_markup=room_keyboard())
 
+async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await feedback_cancel(update, context)
+
 async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await safe_answer(q)
     data = q.data or ""
+
+    if data == "feedback":
+        await feedback_start(update, context)
+        return
+
+    if data == "feedback_cancel":
+        await feedback_cancel(update, context)
+        return
 
     if data == "rooms":
         context.user_data.clear()
@@ -784,7 +900,8 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Не удалось получить список услуг. Попробуйте ещё раз.",
                 reply_markup=kb([
                     [InlineKeyboardButton("🔄 Обновить", callback_data=f"room:{room_key}")],
-                    [InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")]
+                    [InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")],
+                    [InlineKeyboardButton("✉️ Обратная связь", callback_data="feedback")],
                 ])
             )
             return
@@ -891,6 +1008,7 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🔄 Обновить", callback_data=f"day:{day_offset}")],
             [InlineKeyboardButton("↩️ Услуги", callback_data=f"room:{room_key}")],
             [InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")],
+            [InlineKeyboardButton("✉️ Обратная связь", callback_data="feedback")],
         ]))
         return
 
@@ -898,9 +1016,20 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.exception("Unhandled error: %s", context.error)
 
 def main():
-    app = Application.builder().token(TOKEN).build()
+    app = Application.builder().token("8451375652:AAE-h1hS5uCE7qSvxzSSBSRMW3s2_pbUu3Y").build()
+
     app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("feedback", feedback_start))
+    app.add_handler(CommandHandler("cancel", cancel_cmd))
+
     app.add_handler(CallbackQueryHandler(cb))
+
+    # Принимаем обратную связь (текст/фото/файл) только когда включён feedback_mode
+    app.add_handler(MessageHandler(
+        (filters.TEXT | filters.PHOTO | filters.Document.ALL) & (~filters.COMMAND),
+        feedback_receive
+    ))
+
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
