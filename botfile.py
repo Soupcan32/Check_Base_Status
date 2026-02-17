@@ -82,6 +82,22 @@ PHONE_BAD = "Телефон некорректный. Формат: +7XXXXXXXXXX
 # На скрине кнопка: id="appointmentButton", class="btn btn-purple mar_top_10"
 APPOINTMENT_BTN_SELECTOR = "button#appointmentButton, #appointmentButton, button.btn.btn-purple.mar_top_10"
 
+# Комментарий находится в зоне appointmentControls (по скрину)
+COMMENT_ROOT_SELECTOR = "#appointmentControls"
+COMMENT_INPUT_SELECTORS = [
+    "#appointmentControls textarea",
+    "#appointmentControls input[type='text']",
+    "#appointmentControls input:not([type])",
+    "#appointmentControls input",
+    "#appointmentControls [contenteditable='true']",
+    "textarea[placeholder*='Коммент']",
+    "input[placeholder*='Коммент']",
+    "textarea[placeholder*='коммент']",
+    "input[placeholder*='коммент']",
+    "textarea[name*='comment']",
+    "input[name*='comment']",
+]
+
 
 # ---------------- telegram helpers ----------------
 
@@ -262,6 +278,7 @@ def make_driver(headless: bool, profile_dir: Optional[Path]):
     opts = Options()
     if headless:
         opts.add_argument("--headless=new")
+
     opts.add_argument("--disable-gpu")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
@@ -269,6 +286,7 @@ def make_driver(headless: bool, profile_dir: Optional[Path]):
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_argument("--lang=ru-RU")
     opts.add_experimental_option("prefs", {"profile.managed_default_content_settings.images": 2})
+
     try:
         opts.page_load_strategy = "eager"
     except Exception:
@@ -668,158 +686,6 @@ def parse_times_mode(driver, tries=26, sleep_sec=0.2, min_votes=2):
     return list(best)
 
 
-# ---------------- booking helpers (NEW) ----------------
-
-def click_time_slot(driver, time_str: str) -> bool:
-    """
-    Кликает по конкретному слоту внутри #timeBlocks по тексту "HH:MM".
-    Возвращает True, если кликнул.
-    """
-    time_str = (time_str or "").strip()
-    if not time_str:
-        return False
-
-    ok = driver.execute_script(
-        r"""
-const target = String(arguments[0] || '').trim();
-const tb = document.querySelector('#timeBlocks');
-if (!tb || !target) return false;
-
-const isHidden = (el) => {
-  const st = window.getComputedStyle(el);
-  return st.display === 'none' || st.visibility === 'hidden';
-};
-const isDisabled = (el) => {
-  if (!el) return true;
-  const cls = (el.getAttribute('class') || '').toLowerCase();
-  const aria = (el.getAttribute('aria-disabled') || '').toLowerCase();
-  const disabled = el.getAttribute('disabled');
-  const pe = window.getComputedStyle(el).pointerEvents;
-  return !!disabled || aria === 'true' || cls.includes('disabled') || pe === 'none';
-};
-
-const nodes = Array.from(tb.querySelectorAll('label,button,a'));
-for (const el of nodes) {
-  if (isHidden(el)) continue;
-  const txt = (el.textContent || el.innerText || '').trim();
-  if (!txt) continue;
-  if (!txt.includes(target)) continue;
-
-  // если label — предпочтительно кликать label
-  if (isDisabled(el)) continue;
-
-  el.scrollIntoView({block:'center'});
-  el.click();
-  return true;
-}
-return false;
-""",
-        time_str,
-    )
-    return bool(ok)
-
-
-def try_fill_comment(driver, comment: str) -> bool:
-    """
-    Пытается найти поле комментария (textarea/input) по placeholder и заполнить его.
-    Возвращает True, если поле найдено и заполнено.
-    """
-    comment = (comment or "").strip()
-    if not comment:
-        return False
-
-    filled = driver.execute_script(
-        r"""
-const val = String(arguments[0] || '');
-const inputs = Array.from(document.querySelectorAll('textarea, input[type="text"], input:not([type])'));
-
-function score(el){
-  const ph = (el.getAttribute('placeholder') || '').toLowerCase();
-  const name = (el.getAttribute('name') || '').toLowerCase();
-  const id = (el.getAttribute('id') || '').toLowerCase();
-  const cls = (el.getAttribute('class') || '').toLowerCase();
-  const all = [ph, name, id, cls].join(' ');
-  let s = 0;
-  if (all.includes('коммент')) s += 5;
-  if (all.includes('comment')) s += 5;
-  if (all.includes('notes')) s += 2;
-  if (all.includes('note')) s += 1;
-  return s;
-}
-
-let best = null;
-let bestScore = 0;
-for (const el of inputs) {
-  const st = window.getComputedStyle(el);
-  if (st.display === 'none' || st.visibility === 'hidden') continue;
-  const r = el.getBoundingClientRect();
-  if (r.width < 60 || r.height < 18) continue;
-  const sc = score(el);
-  if (sc > bestScore) { bestScore = sc; best = el; }
-}
-
-if (!best || bestScore <= 0) return false;
-
-best.focus();
-best.value = val;
-best.dispatchEvent(new Event('input', {bubbles:true}));
-best.dispatchEvent(new Event('change', {bubbles:true}));
-return true;
-""",
-        comment,
-    )
-    return bool(filled)
-
-
-def click_appointment_button(driver) -> bool:
-    """
-    Нажимает на кнопку 'Записаться' (appointmentButton).
-    Возвращает True, если кнопка найдена и нажата.
-    """
-    try:
-        btn = WebDriverWait(driver, 12, poll_frequency=WAIT_POLL).until(
-            EC.element_to_be_clickable((By.CSS_SELECTOR, APPOINTMENT_BTN_SELECTOR))
-        )
-    except TimeoutException:
-        return False
-
-    if is_disabled_like(driver, btn):
-        return False
-
-    robust_click(driver, btn)
-    return True
-
-
-def wait_booking_feedback(driver, timeout=10) -> str:
-    """
-    Пытается уловить признаки результата после клика 'Записаться'.
-    Возвращает краткую строку статуса (может быть пустой).
-    """
-    end = time.time() + timeout
-    needles = [
-        "спасибо",
-        "успеш",
-        "запис",
-        "appointment",
-        "подтверж",
-        "ваша запись",
-        "created",
-        "success",
-        "ошибка",
-        "error",
-    ]
-    last = ""
-    while time.time() < end:
-        src = (driver.page_source or "")
-        low = src.lower()
-        for n in needles:
-            if n in low:
-                return n
-        last = low[-2000:] if low else last
-        time.sleep(0.25)
-    return ""
-
-
 # ---------------- services parsing ----------------
 
 @dataclass(frozen=True)
@@ -1132,7 +998,7 @@ def click_specific_date(driver, target_date: date):
     raise RuntimeError("Не удалось выбрать дату в календаре.")
 
 
-# ---------------- main scenario ----------------
+# ---------------- main scenario (find times) ----------------
 
 @dataclass(frozen=True)
 class TimesResult:
@@ -1180,7 +1046,224 @@ def get_times_for_selection(driver, url: str, sids, target_date: date) -> TimesR
     return TimesResult(status="EMPTY", times=[])
 
 
-# ---------------- Booking scenario (NEW) ----------------
+# ---------------- booking helpers ----------------
+
+def click_time_slot(driver, time_str: str) -> bool:
+    time_str = (time_str or "").strip()
+    if not time_str:
+        return False
+
+    ok = driver.execute_script(
+        r"""
+const target = String(arguments[0] || '').trim();
+const tb = document.querySelector('#timeBlocks');
+if (!tb || !target) return false;
+
+const isHidden = (el) => {
+  const st = window.getComputedStyle(el);
+  return st.display === 'none' || st.visibility === 'hidden';
+};
+const isDisabled = (el) => {
+  if (!el) return true;
+  const cls = (el.getAttribute('class') || '').toLowerCase();
+  const aria = (el.getAttribute('aria-disabled') || '').toLowerCase();
+  const disabled = el.getAttribute('disabled');
+  const pe = window.getComputedStyle(el).pointerEvents;
+  return !!disabled || aria === 'true' || cls.includes('disabled') || pe === 'none';
+};
+
+const nodes = Array.from(tb.querySelectorAll('label,button,a'));
+for (const el of nodes) {
+  if (isHidden(el)) continue;
+  const txt = (el.textContent || el.innerText || '').trim();
+  if (!txt) continue;
+  if (!txt.includes(target)) continue;
+  if (isDisabled(el)) continue;
+  el.scrollIntoView({block:'center'});
+  el.click();
+  return true;
+}
+return false;
+""",
+        time_str,
+    )
+    return bool(ok)
+
+
+def _maybe_open_comment_ui(driver):
+    """
+    На некоторых разметках поле комментария появляется после клика по иконке/кнопке.
+    Делаем безопасную попытку раскрыть.
+    """
+    driver.execute_script(
+        r"""
+const root = document.querySelector(arguments[0]) || document;
+const candidates = [
+  '.fa-comment', '.fa-comments',
+  '.glyphicon-comment',
+  '[class*="comment"]',
+  '[title*="Коммент"]', '[title*="коммент"]',
+  '[aria-label*="Коммент"]', '[aria-label*="коммент"]'
+];
+for (const sel of candidates) {
+  const el = root.querySelector(sel);
+  if (!el) continue;
+  const btn = el.closest('button,a,span,div') || el;
+  const st = window.getComputedStyle(btn);
+  if (st.display === 'none' || st.visibility === 'hidden') continue;
+  const r = btn.getBoundingClientRect();
+  if (r.width < 8 || r.height < 8) continue;
+  try { btn.click(); } catch(e) {}
+  break;
+}
+""",
+        COMMENT_ROOT_SELECTOR,
+    )
+
+
+def _find_first_visible(driver, selectors: list[str], timeout=12):
+    end = time.time() + timeout
+    last_exc = None
+    while time.time() < end:
+        for sel in selectors:
+            try:
+                el = driver.find_element(By.CSS_SELECTOR, sel)
+            except Exception as e:
+                last_exc = e
+                continue
+            try:
+                if not el.is_displayed():
+                    continue
+                r = el.rect
+                if (r.get("width", 0) or 0) < 40 or (r.get("height", 0) or 0) < 16:
+                    continue
+                return el
+            except Exception as e:
+                last_exc = e
+                continue
+        time.sleep(0.2)
+    if last_exc:
+        raise TimeoutException(str(last_exc))
+    raise TimeoutException("Element not found")
+
+
+def fill_comment_strict(driver, comment: str, timeout=14) -> bool:
+    """
+    ФИКС: строго заполняем поле комментария на сайте и проверяем, что значение реально установлено.
+    Если поле не найдено/не заполняется — возвращаем False, и запись НЕ нажимаем.
+    """
+    comment = (comment or "").strip()
+    if not comment:
+        return False
+
+    _maybe_open_comment_ui(driver)
+
+    try:
+        el = _find_first_visible(driver, COMMENT_INPUT_SELECTORS, timeout=timeout)
+    except TimeoutException:
+        return False
+
+    tag = (el.tag_name or "").lower()
+    is_contenteditable = (el.get_attribute("contenteditable") or "").lower() == "true"
+
+    try:
+        if is_contenteditable:
+            driver.execute_script(
+                r"""
+const el = arguments[0];
+const val = arguments[1];
+el.focus();
+el.innerText = '';
+el.textContent = '';
+el.innerHTML = '';
+el.dispatchEvent(new Event('input', {bubbles:true}));
+el.textContent = val;
+el.dispatchEvent(new Event('input', {bubbles:true}));
+el.dispatchEvent(new Event('change', {bubbles:true}));
+""",
+                el,
+                comment,
+            )
+        elif tag in ("input", "textarea"):
+            _fill_input_sendkeys(el, comment)
+            try:
+                el.send_keys(Keys.TAB)
+            except Exception:
+                pass
+        else:
+            # неизвестный элемент — пробуем как contenteditable
+            driver.execute_script(
+                r"""
+const el = arguments[0];
+const val = arguments[1];
+el.focus();
+el.textContent = val;
+el.dispatchEvent(new Event('input', {bubbles:true}));
+el.dispatchEvent(new Event('change', {bubbles:true}));
+""",
+                el,
+                comment,
+            )
+    except Exception:
+        return False
+
+    # Проверка значения
+    end = time.time() + 8
+    while time.time() < end:
+        try:
+            if is_contenteditable:
+                cur = (el.text or "").strip()
+            else:
+                cur = (el.get_attribute("value") or "").strip()
+        except Exception:
+            cur = ""
+        if comment in cur or cur == comment:
+            return True
+        time.sleep(0.2)
+
+    return False
+
+
+def click_appointment_button(driver) -> bool:
+    try:
+        btn = WebDriverWait(driver, 12, poll_frequency=WAIT_POLL).until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, APPOINTMENT_BTN_SELECTOR))
+        )
+    except TimeoutException:
+        return False
+
+    if is_disabled_like(driver, btn):
+        return False
+
+    robust_click(driver, btn)
+    return True
+
+
+def wait_booking_feedback(driver, timeout=10) -> str:
+    end = time.time() + timeout
+    needles = [
+        "спасибо",
+        "успеш",
+        "запис",
+        "appointment",
+        "подтверж",
+        "ваша запись",
+        "created",
+        "success",
+        "ошибка",
+        "error",
+    ]
+    while time.time() < end:
+        src = (driver.page_source or "")
+        low = src.lower()
+        for n in needles:
+            if n in low:
+                return n
+        time.sleep(0.25)
+    return ""
+
+
+# ---------------- Booking scenario ----------------
 
 @dataclass(frozen=True)
 class BookingAttempt:
@@ -1197,8 +1280,8 @@ def book_appointment_flow(driver, url: str, sids, target_date: date, time_str: s
       - открыть календарь/таймслоты
       - выбрать дату
       - кликнуть таймслот time_str
-      - заполнить комментарий (если поле найдено)
-      - кликнуть "Записаться"
+      - (ФИКС) строго заполнить поле комментария на сайте
+      - только после этого кликнуть "Записаться"
     """
     try:
         open_page(driver, url)
@@ -1223,8 +1306,13 @@ def book_appointment_flow(driver, url: str, sids, target_date: date, time_str: s
         if not click_time_slot(driver, time_str):
             return BookingAttempt(time=time_str, ok=False, message=f"Не смог кликнуть слот {time_str}")
 
+        # ФИКС: не нажимаем "Записаться" пока не заполним комментарий
         time.sleep(0.2)
-        try_fill_comment(driver, comment)
+        if not fill_comment_strict(driver, comment, timeout=14):
+            return BookingAttempt(time=time_str, ok=False, message="Не нашёл/не смог заполнить поле комментария")
+
+        # небольшая пауза: иногда кнопка становится активной после input/change
+        time.sleep(0.2)
 
         if not click_appointment_button(driver):
             return BookingAttempt(time=time_str, ok=False, message="Кнопка «Записаться» не найдена/не кликабельна")
@@ -1233,7 +1321,7 @@ def book_appointment_flow(driver, url: str, sids, target_date: date, time_str: s
         if hint in ("ошибка", "error"):
             return BookingAttempt(time=time_str, ok=False, message="После клика обнаружен текст ошибки на странице")
 
-        return BookingAttempt(time=time_str, ok=True, message="Кнопка «Записаться» нажата")
+        return BookingAttempt(time=time_str, ok=True, message="Комментарий заполнен, «Записаться» нажата")
     except Exception as e:
         return BookingAttempt(time=time_str, ok=False, message=str(e) or "Unknown error")
 
@@ -1261,7 +1349,7 @@ def cabinet_login_with_driver(driver, url: str, phone: str, password: str) -> Au
         return AuthResult(True, "Сессия уже активна, «Мои записи» доступны.", verified_records=True)
 
     _js_find_and_click_by_text(driver, ["вход", "войти", "sign in", "login"])
-    WebDriverWait(driver, 14, poll_frequency=WAIT_POLL).until(lambda d: _js_modal_visible(d))
+    WebDriverWait(driver, 14, poll_frequency=WAIT_POLL).until(lambda d: bool(_js_modal_visible(d)))
 
     try:
         inp_phone = _find_input_in_modal_by_placeholder(driver, "телефон", timeout=10)
@@ -1311,7 +1399,7 @@ def cabinet_login_with_driver(driver, url: str, phone: str, password: str) -> Au
 def cabinet_register_with_driver(driver, url: str, name: str, phone: str, password: str, password2: str) -> AuthResult:
     open_page(driver, url)
     _js_find_and_click_by_text(driver, ["регистрация", "sign up", "registration"])
-    WebDriverWait(driver, 14, poll_frequency=WAIT_POLL).until(lambda d: _js_modal_visible(d))
+    WebDriverWait(driver, 14, poll_frequency=WAIT_POLL).until(lambda d: bool(_js_modal_visible(d)))
 
     try:
         inp_name = _find_input_in_modal_by_placeholder(driver, "имя", timeout=10)
@@ -1364,7 +1452,9 @@ function visible(el){
   const r = el.getBoundingClientRect();
   return r.width > 20 && r.height > 10;
 }
+
 const nodes = Array.from(document.querySelectorAll('div,li,article,section,main')).filter(visible);
+
 const out = [];
 const seen = new Set();
 
@@ -1415,6 +1505,7 @@ for (const el of nodes) {
   out.push(lines.slice(0, 14).join('\n'));
   if (out.length >= 40) break;
 }
+
 return out;
 """
     )
@@ -1918,7 +2009,7 @@ async def cabinet_receive_text(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def any_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # NEW: ожидание комментария для записи -> после Enter кликаем "Записаться" на сайте
+    # ожидание комментария для записи -> после Enter заполняем форму на сайте -> потом жмём "Записаться"
     if context.user_data.get("booking_comment_mode"):
         msg = update.message
         comment = (msg.text or "").strip() if msg else ""
@@ -1951,7 +2042,7 @@ async def any_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await msg.reply_text("Некорректная дата в черновике. Выберите дату заново.", reply_markup=room_keyboard(get_logged_flag(context)))
             return
 
-        await msg.reply_text("Принял комментарий. Пытаюсь нажать «Записаться» на сайте…")
+        await msg.reply_text("Принял комментарий. Заполняю поле комментария на сайте и нажимаю «Записаться»…")
 
         worker = get_worker_for_update(update)
         loop = asyncio.get_running_loop()
@@ -1979,7 +2070,6 @@ async def any_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if bad_list:
             text += "❌ Не удалось:\n" + "\n".join([f"- {a.time}: {a.message}" for a in bad_list]) + "\n\n"
 
-        # опционально: уведомление админу
         if ADMIN_CHAT_ID:
             try:
                 user = update.effective_user
@@ -2030,12 +2120,10 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_answer(q)
     data = q.data or ""
 
-    # feedback lock
     if context.user_data.get("feedback_mode") and data not in ("feedback", "feedback_cancel", "rooms"):
         await q.answer("Сначала завершите/отмените обратную связь.", show_alert=False)
         return
 
-    # cabinet lock
     cab = context.user_data.get("cabinet")
     if cab and cab.get("active"):
         if data not in ("cab_reg", "cab_login", "cab_cancel", "rooms"):
@@ -2131,7 +2219,7 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "calnoop":
         return
 
-    # toggle выбор времени (мультивыбор)
+    # toggle время (мультивыбор)
     if data.startswith("time:"):
         parts = data.split(":", 3)
         if len(parts) != 4:
