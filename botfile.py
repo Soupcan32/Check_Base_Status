@@ -79,6 +79,9 @@ PROFILES_DIR.mkdir(parents=True, exist_ok=True)
 PHONE_HINT = "Введите номер телефона (логин) в формате +7XXXXXXXXXX\nПример: +79991234567"
 PHONE_BAD = "Телефон некорректный. Формат: +7XXXXXXXXXX\nПример: +79991234567"
 
+# На скрине кнопка: id="appointmentButton", class="btn btn-purple mar_top_10"
+APPOINTMENT_BTN_SELECTOR = "button#appointmentButton, #appointmentButton, button.btn.btn-purple.mar_top_10"
+
 
 # ---------------- telegram helpers ----------------
 
@@ -259,7 +262,6 @@ def make_driver(headless: bool, profile_dir: Optional[Path]):
     opts = Options()
     if headless:
         opts.add_argument("--headless=new")
-
     opts.add_argument("--disable-gpu")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
@@ -267,7 +269,6 @@ def make_driver(headless: bool, profile_dir: Optional[Path]):
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_argument("--lang=ru-RU")
     opts.add_experimental_option("prefs", {"profile.managed_default_content_settings.images": 2})
-
     try:
         opts.page_load_strategy = "eager"
     except Exception:
@@ -667,6 +668,158 @@ def parse_times_mode(driver, tries=26, sleep_sec=0.2, min_votes=2):
     return list(best)
 
 
+# ---------------- booking helpers (NEW) ----------------
+
+def click_time_slot(driver, time_str: str) -> bool:
+    """
+    Кликает по конкретному слоту внутри #timeBlocks по тексту "HH:MM".
+    Возвращает True, если кликнул.
+    """
+    time_str = (time_str or "").strip()
+    if not time_str:
+        return False
+
+    ok = driver.execute_script(
+        r"""
+const target = String(arguments[0] || '').trim();
+const tb = document.querySelector('#timeBlocks');
+if (!tb || !target) return false;
+
+const isHidden = (el) => {
+  const st = window.getComputedStyle(el);
+  return st.display === 'none' || st.visibility === 'hidden';
+};
+const isDisabled = (el) => {
+  if (!el) return true;
+  const cls = (el.getAttribute('class') || '').toLowerCase();
+  const aria = (el.getAttribute('aria-disabled') || '').toLowerCase();
+  const disabled = el.getAttribute('disabled');
+  const pe = window.getComputedStyle(el).pointerEvents;
+  return !!disabled || aria === 'true' || cls.includes('disabled') || pe === 'none';
+};
+
+const nodes = Array.from(tb.querySelectorAll('label,button,a'));
+for (const el of nodes) {
+  if (isHidden(el)) continue;
+  const txt = (el.textContent || el.innerText || '').trim();
+  if (!txt) continue;
+  if (!txt.includes(target)) continue;
+
+  // если label — предпочтительно кликать label
+  if (isDisabled(el)) continue;
+
+  el.scrollIntoView({block:'center'});
+  el.click();
+  return true;
+}
+return false;
+""",
+        time_str,
+    )
+    return bool(ok)
+
+
+def try_fill_comment(driver, comment: str) -> bool:
+    """
+    Пытается найти поле комментария (textarea/input) по placeholder и заполнить его.
+    Возвращает True, если поле найдено и заполнено.
+    """
+    comment = (comment or "").strip()
+    if not comment:
+        return False
+
+    filled = driver.execute_script(
+        r"""
+const val = String(arguments[0] || '');
+const inputs = Array.from(document.querySelectorAll('textarea, input[type="text"], input:not([type])'));
+
+function score(el){
+  const ph = (el.getAttribute('placeholder') || '').toLowerCase();
+  const name = (el.getAttribute('name') || '').toLowerCase();
+  const id = (el.getAttribute('id') || '').toLowerCase();
+  const cls = (el.getAttribute('class') || '').toLowerCase();
+  const all = [ph, name, id, cls].join(' ');
+  let s = 0;
+  if (all.includes('коммент')) s += 5;
+  if (all.includes('comment')) s += 5;
+  if (all.includes('notes')) s += 2;
+  if (all.includes('note')) s += 1;
+  return s;
+}
+
+let best = null;
+let bestScore = 0;
+for (const el of inputs) {
+  const st = window.getComputedStyle(el);
+  if (st.display === 'none' || st.visibility === 'hidden') continue;
+  const r = el.getBoundingClientRect();
+  if (r.width < 60 || r.height < 18) continue;
+  const sc = score(el);
+  if (sc > bestScore) { bestScore = sc; best = el; }
+}
+
+if (!best || bestScore <= 0) return false;
+
+best.focus();
+best.value = val;
+best.dispatchEvent(new Event('input', {bubbles:true}));
+best.dispatchEvent(new Event('change', {bubbles:true}));
+return true;
+""",
+        comment,
+    )
+    return bool(filled)
+
+
+def click_appointment_button(driver) -> bool:
+    """
+    Нажимает на кнопку 'Записаться' (appointmentButton).
+    Возвращает True, если кнопка найдена и нажата.
+    """
+    try:
+        btn = WebDriverWait(driver, 12, poll_frequency=WAIT_POLL).until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, APPOINTMENT_BTN_SELECTOR))
+        )
+    except TimeoutException:
+        return False
+
+    if is_disabled_like(driver, btn):
+        return False
+
+    robust_click(driver, btn)
+    return True
+
+
+def wait_booking_feedback(driver, timeout=10) -> str:
+    """
+    Пытается уловить признаки результата после клика 'Записаться'.
+    Возвращает краткую строку статуса (может быть пустой).
+    """
+    end = time.time() + timeout
+    needles = [
+        "спасибо",
+        "успеш",
+        "запис",
+        "appointment",
+        "подтверж",
+        "ваша запись",
+        "created",
+        "success",
+        "ошибка",
+        "error",
+    ]
+    last = ""
+    while time.time() < end:
+        src = (driver.page_source or "")
+        low = src.lower()
+        for n in needles:
+            if n in low:
+                return n
+        last = low[-2000:] if low else last
+        time.sleep(0.25)
+    return ""
+
+
 # ---------------- services parsing ----------------
 
 @dataclass(frozen=True)
@@ -678,8 +831,7 @@ class ServiceItem:
 def bumpix_get_services_with_driver(driver, url: str):
     open_page(driver, url)
     WebDriverWait(driver, 18, poll_frequency=WAIT_POLL).until(
-        lambda d: (d.execute_script("return document.querySelectorAll('input.data_service[data-service-id]').length") or 0)
-        > 0
+        lambda d: (d.execute_script("return document.querySelectorAll('input.data_service[data-service-id]').length") or 0) > 0
     )
 
     rows = driver.execute_script(
@@ -1028,6 +1180,64 @@ def get_times_for_selection(driver, url: str, sids, target_date: date) -> TimesR
     return TimesResult(status="EMPTY", times=[])
 
 
+# ---------------- Booking scenario (NEW) ----------------
+
+@dataclass(frozen=True)
+class BookingAttempt:
+    time: str
+    ok: bool
+    message: str
+
+
+def book_appointment_flow(driver, url: str, sids, target_date: date, time_str: str, comment: str) -> BookingAttempt:
+    """
+    Полный сценарий:
+      - открыть комнату
+      - выбрать услуги
+      - открыть календарь/таймслоты
+      - выбрать дату
+      - кликнуть таймслот time_str
+      - заполнить комментарий (если поле найдено)
+      - кликнуть "Записаться"
+    """
+    try:
+        open_page(driver, url)
+        select_services(driver, sids)
+        click_choose_time(driver, timeout=22)
+        wait_calendar_visible(driver, timeout=14)
+
+        click_specific_date(driver, target_date)
+
+        if is_server_error_timeblocks(driver):
+            return BookingAttempt(time=time_str, ok=False, message="Серверная ошибка в timeBlocks")
+
+        try:
+            wait_timeblocks_stable(driver, timeout=12, stable_for_sec=0.7)
+        except TimeoutException:
+            pass
+        try:
+            wait_timeblocks_not_placeholder(driver, timeout=8)
+        except TimeoutException:
+            pass
+
+        if not click_time_slot(driver, time_str):
+            return BookingAttempt(time=time_str, ok=False, message=f"Не смог кликнуть слот {time_str}")
+
+        time.sleep(0.2)
+        try_fill_comment(driver, comment)
+
+        if not click_appointment_button(driver):
+            return BookingAttempt(time=time_str, ok=False, message="Кнопка «Записаться» не найдена/не кликабельна")
+
+        hint = wait_booking_feedback(driver, timeout=10)
+        if hint in ("ошибка", "error"):
+            return BookingAttempt(time=time_str, ok=False, message="После клика обнаружен текст ошибки на странице")
+
+        return BookingAttempt(time=time_str, ok=True, message="Кнопка «Записаться» нажата")
+    except Exception as e:
+        return BookingAttempt(time=time_str, ok=False, message=str(e) or "Unknown error")
+
+
 # ---------------- Cabinet Selenium logic ----------------
 
 @dataclass(frozen=True)
@@ -1154,9 +1364,7 @@ function visible(el){
   const r = el.getBoundingClientRect();
   return r.width > 20 && r.height > 10;
 }
-
 const nodes = Array.from(document.querySelectorAll('div,li,article,section,main')).filter(visible);
-
 const out = [];
 const seen = new Set();
 
@@ -1207,7 +1415,6 @@ for (const el of nodes) {
   out.push(lines.slice(0, 14).join('\n'));
   if (out.length >= 40) break;
 }
-
 return out;
 """
     )
@@ -1309,6 +1516,22 @@ class BumpixUserWorker:
                     return get_times_for_selection(self.driver, url, sids, target_date)
                 except Exception as e2:
                     return TimesResult(status="ERROR", times=[], error=str(e2) or str(e))
+
+    def book_appointments(self, url: str, sids, target_date: date, times: list[str], comment: str) -> list[BookingAttempt]:
+        with self.lock:
+            self._ensure_driver()
+            out: list[BookingAttempt] = []
+            for t in times:
+                try:
+                    out.append(book_appointment_flow(self.driver, url, sids, target_date, t, comment))
+                except (WebDriverException, StaleElementReferenceException) as e:
+                    self.reset_driver()
+                    self._ensure_driver()
+                    try:
+                        out.append(book_appointment_flow(self.driver, url, sids, target_date, t, comment))
+                    except Exception as e2:
+                        out.append(BookingAttempt(time=t, ok=False, message=str(e2) or str(e)))
+            return out
 
     def cabinet_login(self, url: str, phone: str, password: str) -> AuthResult:
         with self.lock:
@@ -1420,10 +1643,6 @@ def services_keyboard(services, selected_idx_set, page: int, room_key: str, logg
 
 
 def times_keyboard(times: list[str], iso: str, room_key: str, logged_in: bool, selected_times=None):
-    """
-    Мультивыбор: каждый слот — toggle-кнопка.
-    Если выбрано >=1, появляется кнопка "К записи".
-    """
     times = (times or [])[:30]
     selected = set(selected_times or [])
 
@@ -1699,7 +1918,7 @@ async def cabinet_receive_text(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def any_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # NEW: ожидание комментария для записи
+    # NEW: ожидание комментария для записи -> после Enter кликаем "Записаться" на сайте
     if context.user_data.get("booking_comment_mode"):
         msg = update.message
         comment = (msg.text or "").strip() if msg else ""
@@ -1712,32 +1931,64 @@ async def any_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
         draft["comment"] = comment
         context.user_data["booking_draft"] = draft
 
-        room_key = draft.get("room_key", "grey")
-        date_iso = draft.get("date_iso", "")
-        times = draft.get("times", [])
-        titles = draft.get("titles", [])
+        room_key = draft.get("room_key")
+        date_iso = draft.get("date_iso")
+        times = draft.get("times") or []
+        titles = draft.get("titles") or []
+        sids = context.user_data.get("sids") or []
+        url = context.user_data.get("room_url")
+
+        if not room_key or not date_iso or not times or not sids or not url:
+            await msg.reply_text(
+                "Черновик записи неполный. Пожалуйста, выберите комнату/услуги/дату/слоты заново.",
+                reply_markup=room_keyboard(get_logged_flag(context)),
+            )
+            return
+
+        try:
+            target = parse_iso_day(date_iso)
+        except Exception:
+            await msg.reply_text("Некорректная дата в черновике. Выберите дату заново.", reply_markup=room_keyboard(get_logged_flag(context)))
+            return
+
+        await msg.reply_text("Принял комментарий. Пытаюсь нажать «Записаться» на сайте…")
+
+        worker = get_worker_for_update(update)
+        loop = asyncio.get_running_loop()
+        attempts: list[BookingAttempt] = await loop.run_in_executor(
+            EXECUTOR, lambda: worker.book_appointments(url, sids, target, list(times), comment)
+        )
+
+        ok_list = [a for a in attempts if a.ok]
+        bad_list = [a for a in attempts if not a.ok]
 
         types_text = ", ".join(titles) if titles else "(не выбрано)"
         times_text = ", ".join(times) if times else "(не выбрано)"
 
         text = (
-            "✅ Заявка на запись сформирована.\n\n"
+            "📝 Результат записи\n\n"
             f"Комната: {ROOMS[room_key]['title']}\n"
             f"Дата: {date_iso}\n"
             f"Тип: {types_text}\n"
-            f"Время: {times_text}\n\n"
-            f"Комментарий: {comment}"
+            f"Слоты: {times_text}\n"
+            f"Комментарий: {comment}\n\n"
         )
 
+        if ok_list:
+            text += "✅ Успешно:\n" + "\n".join([f"- {a.time}: {a.message}" for a in ok_list]) + "\n\n"
+        if bad_list:
+            text += "❌ Не удалось:\n" + "\n".join([f"- {a.time}: {a.message}" for a in bad_list]) + "\n\n"
+
+        # опционально: уведомление админу
         if ADMIN_CHAT_ID:
             try:
                 user = update.effective_user
                 who = f"{user.full_name} (@{user.username}) id={user.id}" if user else "unknown"
-                await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"📝 Новая заявка\nОт: {who}\n\n{text}")
+                await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"📝 Попытка записи\nОт: {who}\n\n{text}")
             except Exception:
                 pass
 
-        await msg.reply_text(text, reply_markup=room_keyboard(get_logged_flag(context)))
+        await msg.reply_text(text[:3900], reply_markup=room_keyboard(get_logged_flag(context)))
         return
 
     if context.user_data.get("feedback_mode"):
@@ -1880,7 +2131,7 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "calnoop":
         return
 
-    # --- NEW: toggle выбор времени (мультивыбор) ---
+    # toggle выбор времени (мультивыбор)
     if data.startswith("time:"):
         parts = data.split(":", 3)
         if len(parts) != 4:
@@ -1889,7 +2140,6 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _, iso, hh, mm = parts
         picked = f"{hh}:{mm}"
 
-        # если дата сменилась — сбросим выбор
         if context.user_data.get("picked_times_iso") != iso:
             context.user_data["picked_times_iso"] = iso
             context.user_data["picked_times"] = set()
@@ -1931,7 +2181,7 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # --- NEW: "К записи" -> подтверждение ---
+    # "К записи" -> подтверждение
     if data.startswith("to_booking:"):
         iso = data.split("to_booking:", 1)[1].strip()
 
@@ -2004,12 +2254,9 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         context.user_data["booking_comment_mode"] = True
-
         await q.edit_message_text(
-            "Введите комментарий:",
-            reply_markup=kb([
-                [InlineKeyboardButton("❌ Отменить", callback_data="booking_comment_cancel")]
-            ]),
+            "Введите комментарий и отправьте сообщением (Enter):",
+            reply_markup=kb([[InlineKeyboardButton("❌ Отменить", callback_data="booking_comment_cancel")]]),
         )
         return
 
@@ -2040,7 +2287,6 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["room_key"] = room_key
         context.user_data["room_url"] = url
 
-        # сброс "черновиков"
         context.user_data.pop("booking_draft", None)
         context.user_data.pop("picked_times_iso", None)
         context.user_data.pop("picked_times", None)
@@ -2144,7 +2390,6 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         today = date.today()
         context.user_data["cal_min_date"] = today.isoformat()
 
-        # сброс выбора времени при смене набора услуг
         context.user_data.pop("booking_draft", None)
         context.user_data.pop("picked_times_iso", None)
         context.user_data.pop("picked_times", None)
@@ -2216,7 +2461,6 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["last_times"] = result.times
             context.user_data["last_date_iso"] = iso
 
-            # при открытии новой даты сбрасываем выбранные слоты для другой даты
             if context.user_data.get("picked_times_iso") != iso:
                 context.user_data["picked_times_iso"] = iso
                 context.user_data["picked_times"] = set()
