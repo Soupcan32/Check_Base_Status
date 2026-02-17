@@ -62,7 +62,7 @@ ROOMS = {
 
 CABINET_URL = "https://bumpix.net/soundlevel"
 
-# Мои записи — несколько локалей (на них бывает "Sign in required/Потрібна авторизація...")
+# Мои записи — несколько локалей (на них бывает "Sign in required")
 MY_RECORDS_URLS = [
     "https://bumpix.net/page/client-appointments",
     "https://bumpix.net/ru/page/client-appointments",
@@ -1471,8 +1471,10 @@ async def cabinet_receive_text(update: Update, context: ContextTypes.DEFAULT_TYP
         if step == "phone":
             phone = normalize_phone(text)
             if len(re.sub(r"[^0-9]", "", phone)) < 10:
-                await msg.reply_text("Телефон некорректный. Ещё раз (например +79991234567):",
-                                     reply_markup=cabinet_cancel_keyboard())
+                await msg.reply_text(
+                    "Телефон некорректный. Введите в формате +7XXXXXXXXXX (например +79991234567):",
+                    reply_markup=cabinet_cancel_keyboard()
+                )
                 return
             data["phone"] = phone
             cab["step"] = "password"
@@ -1515,14 +1517,19 @@ async def cabinet_receive_text(update: Update, context: ContextTypes.DEFAULT_TYP
                 return
             data["name"] = text
             cab["step"] = "phone"
-            await msg.reply_text("Введите номер телефона (например +79991234567):", reply_markup=cabinet_cancel_keyboard())
+            await msg.reply_text(
+                "Введите номер телефона в формате +7XXXXXXXXXX (например +79991234567):",
+                reply_markup=cabinet_cancel_keyboard()
+            )
             return
 
         if step == "phone":
             phone = normalize_phone(text)
             if len(re.sub(r"[^0-9]", "", phone)) < 10:
-                await msg.reply_text("Телефон некорректный. Ещё раз (например +79991234567):",
-                                     reply_markup=cabinet_cancel_keyboard())
+                await msg.reply_text(
+                    "Телефон некорректный. Введите в формате +7XXXXXXXXXX (например +79991234567):",
+                    reply_markup=cabinet_cancel_keyboard()
+                )
                 return
             data["phone"] = phone
             cab["step"] = "password"
@@ -1644,7 +1651,11 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "cab_login":
         context.user_data["cabinet"] = {"active": True, "mode": "login", "step": "phone", "data": {}}
-        await q.edit_message_text("Вход.\n\nВведите номер телефона:", reply_markup=cabinet_cancel_keyboard())
+        # FIX: явная подсказка про формат +7XXXXXXXXXX
+        await q.edit_message_text(
+            "Вход.\n\nВведите номер телефона в формате +7XXXXXXXXXX (например +79991234567):",
+            reply_markup=cabinet_cancel_keyboard()
+        )
         return
 
     if data == "reset_web":
