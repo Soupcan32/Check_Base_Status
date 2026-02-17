@@ -2,8 +2,9 @@ import asyncio
 import logging
 import re
 import time
+import calendar as pycal
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from threading import RLock
@@ -40,8 +41,8 @@ logger = logging.getLogger("bumpix-bot")
 TOKEN = "PASTE_YOUR_NEW_TOKEN_HERE"   # <-- вставь новый токен
 HEADLESS = True
 
-# <-- ВАЖНО: сюда свой chat_id (твой личный id или id группы, куда бот может писать)
-ADMIN_CHAT_ID = 125030638  # например 123456789
+# <-- куда пересылать обратную связь (твой chat_id / chat_id группы / chat_id канала)
+ADMIN_CHAT_ID =125030638  # например -1001234567890
 
 WAIT_POLL = 0.1
 EXECUTOR = ThreadPoolExecutor(max_workers=1)
@@ -56,6 +57,9 @@ ROOMS = {
     "blue":  {"title": "🔵 Синяя комната",   "url": "https://bumpix.net/500141"},
     "green": {"title": "🟢 Зелёная комната", "url": "https://bumpix.net/517424"},
 }
+
+# Telegram-календарь: ограничим перелистывание вперёд (например на год)
+MAX_DAYS_AHEAD = 365
 
 
 # ---------------- telegram helpers ----------------
@@ -126,11 +130,9 @@ async def feedback_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
 
     try:
-        # Текст
         if msg.text and not msg.text.startswith("/"):
             await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=header + "\n" + msg.text)
 
-        # Фото (берём максимальный размер)
         elif msg.photo:
             photo = msg.photo[-1]
             cap = header
@@ -138,7 +140,6 @@ async def feedback_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cap += "\n" + msg.caption
             await context.bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=photo.file_id, caption=cap[:1024])
 
-        # Документ/файл
         elif msg.document:
             cap = header
             if msg.caption:
@@ -146,10 +147,7 @@ async def feedback_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_document(chat_id=ADMIN_CHAT_ID, document=msg.document.file_id, caption=cap[:1024])
 
         else:
-            await msg.reply_text(
-                "Пожалуйста, отправь текст, фото или файл.",
-                reply_markup=feedback_keyboard()
-            )
+            await msg.reply_text("Пожалуйста, отправь текст, фото или файл.", reply_markup=feedback_keyboard())
             return
 
         context.user_data["feedback_mode"] = False
@@ -628,7 +626,8 @@ def find_day_cell_for_date_utc(driver, y: int, m0: int, d: int):
         return null;
     """, int(y), int(m0), int(d))
 
-def click_day(driver, day_offset: int):
+def click_specific_date(driver, target_date: date):
+    # target_date - локальная дата; ищем соответствующую ячейку через UTC поля data-date
     try:
         driver.switch_to.default_content()
     except Exception:
@@ -636,8 +635,7 @@ def click_day(driver, day_offset: int):
 
     wait_calendar_days_present_js(driver, timeout=12)
 
-    target = datetime.now() + timedelta(days=day_offset)
-    y, m0, d = target.year, target.month - 1, target.day
+    y, m0, d = target_date.year, target_date.month - 1, target_date.day
     prev = get_timeblocks_html(driver) or ""
 
     for _ in range(14):
@@ -661,7 +659,6 @@ def click_day(driver, day_offset: int):
                         pass
 
                     return
-
                 except StaleElementReferenceException:
                     time.sleep(0.12)
                     cell = find_day_cell_for_date_utc(driver, y, m0, d)
@@ -694,7 +691,7 @@ class TimesResult:
     times: list[str]
     error: str | None = None
 
-def get_times_for_selection(driver, url: str, sids, day_offset: int) -> TimesResult:
+def get_times_for_selection(driver, url: str, sids, target_date: date) -> TimesResult:
     open_page(driver, url)
 
     select_services(driver, sids)
@@ -702,8 +699,9 @@ def get_times_for_selection(driver, url: str, sids, day_offset: int) -> TimesRes
     click_choose_time(driver, timeout=18)
     wait_calendar_visible(driver, timeout=12)
 
+    # retry: иногда timeBlocks временно пустой/ошибочный
     for attempt in range(5):
-        click_day(driver, day_offset)
+        click_specific_date(driver, target_date)
 
         if is_server_error_timeblocks(driver):
             time.sleep(0.8 + attempt * 0.4)
@@ -720,6 +718,7 @@ def get_times_for_selection(driver, url: str, sids, day_offset: int) -> TimesRes
 
         time.sleep(0.5)
 
+    # fallback: refresh
     driver.refresh()
     WebDriverWait(driver, 20, poll_frequency=WAIT_POLL).until(
         EC.presence_of_element_located((By.TAG_NAME, "body"))
@@ -728,7 +727,7 @@ def get_times_for_selection(driver, url: str, sids, day_offset: int) -> TimesRes
     select_services(driver, sids)
     click_choose_time(driver, timeout=18)
     wait_calendar_visible(driver, timeout=12)
-    click_day(driver, day_offset)
+    click_specific_date(driver, target_date)
 
     if is_server_error_timeblocks(driver):
         return TimesResult(status="ERROR", times=[], error="Ошибка сервера при получении слотов")
@@ -746,7 +745,6 @@ class BumpixWorker:
     def __init__(self):
         self.lock = RLock()
         self.driver = None
-
         self.services_cache_by_url: dict[str, list[ServiceItem]] = {}
         self.services_cache_ts_by_url: dict[str, float] = {}
         self.services_ttl = 10 * 60
@@ -784,16 +782,16 @@ class BumpixWorker:
             self.services_cache_ts_by_url[url] = time.time()
             return services
 
-    def get_times(self, url: str, sids, day_offset: int) -> TimesResult:
+    def get_times(self, url: str, sids, target_date: date) -> TimesResult:
         with self.lock:
             self._ensure_driver()
             try:
-                return get_times_for_selection(self.driver, url, sids, day_offset)
+                return get_times_for_selection(self.driver, url, sids, target_date)
             except (WebDriverException, StaleElementReferenceException) as e:
                 self._reset_driver()
                 self._ensure_driver()
                 try:
-                    return get_times_for_selection(self.driver, url, sids, day_offset)
+                    return get_times_for_selection(self.driver, url, sids, target_date)
                 except Exception as e2:
                     return TimesResult(status="ERROR", times=[], error=str(e2) or str(e))
 
@@ -801,7 +799,91 @@ class BumpixWorker:
 WORKER = BumpixWorker()
 
 
-# ---------------- Bot UI ----------------
+# ---------------- Inline calendar (Telegram UI) ----------------
+
+RU_MONTHS = [
+    "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+    "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"
+]
+RU_DOW = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+def clamp_month(year: int, month: int):
+    while month < 1:
+        month += 12
+        year -= 1
+    while month > 12:
+        month -= 12
+        year += 1
+    return year, month
+
+def ym_add(year: int, month: int, delta_months: int):
+    return clamp_month(year, month + delta_months)
+
+def parse_ym(s: str):
+    y, m = s.split("-", 1)
+    return int(y), int(m)
+
+def iso_day(y: int, m: int, d: int) -> str:
+    return f"{y:04d}-{m:02d}-{d:02d}"
+
+def parse_iso_day(s: str) -> date:
+    y, m, d = s.split("-", 2)
+    return date(int(y), int(m), int(d))
+
+def calendar_keyboard(year: int, month: int, min_date: date, room_key: str):
+    max_date = min_date + timedelta(days=MAX_DAYS_AHEAD)
+    first_of_month = date(year, month, 1)
+
+    # запретим листать в прошлое (до текущего месяца min_date)
+    min_ym = (min_date.year, min_date.month)
+    cur_ym = (year, month)
+
+    # запретим листать слишком далеко вперёд
+    max_ym = (max_date.year, max_date.month)
+
+    prev_enabled = cur_ym > min_ym
+    next_enabled = cur_ym < max_ym
+
+    rows = []
+
+    # навигация + заголовок
+    nav = []
+    nav.append(InlineKeyboardButton("⬅️" if prev_enabled else " ", callback_data=f"calnav:{year:04d}-{month:02d}:-1" if prev_enabled else "calnoop"))
+    nav.append(InlineKeyboardButton(f"{RU_MONTHS[month-1]} {year}", callback_data="calnoop"))
+    nav.append(InlineKeyboardButton("➡️" if next_enabled else " ", callback_data=f"calnav:{year:04d}-{month:02d}:+1" if next_enabled else "calnoop"))
+    rows.append(nav)
+
+    # дни недели
+    rows.append([InlineKeyboardButton(x, callback_data="calnoop") for x in RU_DOW])
+
+    cal = pycal.Calendar(firstweekday=0)  # Monday
+    weeks = cal.monthdayscalendar(year, month)
+
+    for w in weeks:
+        r = []
+        for d in w:
+            if d == 0:
+                r.append(InlineKeyboardButton(" ", callback_data="calnoop"))
+                continue
+
+            dt = date(year, month, d)
+            if dt < min_date:
+                r.append(InlineKeyboardButton("·", callback_data="calnoop"))
+                continue
+            if dt > max_date:
+                r.append(InlineKeyboardButton("·", callback_data="calnoop"))
+                continue
+
+            r.append(InlineKeyboardButton(str(d), callback_data=f"date:{iso_day(year, month, d)}"))
+        rows.append(r)
+
+    rows.append([InlineKeyboardButton("↩️ Назад к услугам", callback_data=f"room:{room_key}")])
+    rows.append([InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")])
+    rows.append([InlineKeyboardButton("✉️ Обратная связь", callback_data="feedback")])
+    return kb(rows)
+
+
+# ---------------- Bot UI (rooms/services/calendar) ----------------
 
 PAGE_SIZE = 20
 
@@ -843,15 +925,8 @@ def services_keyboard(services, selected_idx_set, page: int, room_key: str):
     rows.append([InlineKeyboardButton("✉️ Обратная связь", callback_data="feedback")])
     return kb(rows)
 
-def days_keyboard(room_key: str):
-    return kb([
-        [InlineKeyboardButton("Сегодня", callback_data="day:0")],
-        [InlineKeyboardButton("Завтра", callback_data="day:1")],
-        [InlineKeyboardButton("Послезавтра", callback_data="day:2")],
-        [InlineKeyboardButton("↩️ Назад к услугам", callback_data=f"room:{room_key}")],
-        [InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")],
-        [InlineKeyboardButton("✉️ Обратная связь", callback_data="feedback")],
-    ])
+
+# ---------------- handlers ----------------
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Выберите комнату:", reply_markup=room_keyboard())
@@ -864,6 +939,11 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_answer(q)
     data = q.data or ""
 
+    # если пользователь сейчас пишет обратную связь — пусть сначала отменит
+    if context.user_data.get("feedback_mode") and data not in ("feedback", "feedback_cancel", "rooms"):
+        await q.answer("Сначала завершите/отмените обратную связь.", show_alert=False)
+        return
+
     if data == "feedback":
         await feedback_start(update, context)
         return
@@ -875,6 +955,9 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "rooms":
         context.user_data.clear()
         await q.edit_message_text("Выберите комнату:", reply_markup=room_keyboard())
+        return
+
+    if data == "calnoop":
         return
 
     if data.startswith("room:"):
@@ -974,46 +1057,110 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["sids"] = sids
         context.user_data["titles"] = titles
 
-        await q.edit_message_text("Выберите день:", reply_markup=days_keyboard(room_key))
+        # показать календарь текущего месяца (сегодня и дальше)
+        today = date.today()
+        context.user_data["cal_min_date"] = today.isoformat()
+
+        await q.edit_message_text(
+            "Выберите дату (прошедшие дни недоступны):",
+            reply_markup=calendar_keyboard(today.year, today.month, today, room_key)
+        )
         return
 
-    if data.startswith("day:"):
+    if data.startswith("calnav:"):
+        # calnav:YYYY-MM:+1 or -1
+        room_key = context.user_data.get("room_key", "grey")
+        min_iso = context.user_data.get("cal_min_date") or date.today().isoformat()
+        min_date = parse_iso_day(min_iso)
+
+        _, rest = data.split("calnav:", 1)
+        ym, delta = rest.rsplit(":", 1)
+        y, m = parse_ym(ym)
+        dm = int(delta)  # +1/-1
+        ny, nm = ym_add(y, m, dm)
+
+        max_date = min_date + timedelta(days=MAX_DAYS_AHEAD)
+        if (ny, nm) < (min_date.year, min_date.month):
+            return
+        if (ny, nm) > (max_date.year, max_date.month):
+            return
+
+        await q.edit_message_reply_markup(reply_markup=calendar_keyboard(ny, nm, min_date, room_key))
+        return
+
+    if data.startswith("date:"):
+        # выбранная дата из календаря + кнопка обновить
         room_key = context.user_data.get("room_key")
         url = context.user_data.get("room_url")
         sids = context.user_data.get("sids", [])
         titles = context.user_data.get("titles", [])
+
         if not room_key or not url or not sids:
             await q.edit_message_text("Сначала выберите комнату и услуги.", reply_markup=room_keyboard())
             return
 
-        day_offset = int(data.split("day:", 1)[1])
+        iso = data.split("date:", 1)[1].strip()
+        try:
+            target = parse_iso_day(iso)
+        except Exception:
+            await q.edit_message_text("Некорректная дата.", reply_markup=room_keyboard())
+            return
+
+        today = date.today()
+        if target < today:
+            await q.answer("Нельзя выбирать прошедшие дни.")
+            return
+
+        if target > today + timedelta(days=MAX_DAYS_AHEAD):
+            await q.answer("Слишком далеко. Выберите дату ближе.")
+            return
+
+        context.user_data["last_date"] = iso
+
         await q.edit_message_text("Ищу свободные слоты…")
 
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(EXECUTOR, lambda: WORKER.get_times(url, sids, day_offset))
+        result = await loop.run_in_executor(EXECUTOR, lambda: WORKER.get_times(url, sids, target))
 
         header = " + ".join(titles[:2])
         if len(titles) > 2:
             header += f" (+{len(titles)-2} ещё)"
 
+        pretty_date = target.strftime("%d.%m.%Y")
+
         if result.status == "OK" and result.times:
-            text = f"{ROOMS[room_key]['title']}\n{header}\n\nСвободное время (+{day_offset} дн.):\n" + "\n".join(result.times[:30])
+            text = f"{ROOMS[room_key]['title']}\n{header}\n\nДата: {pretty_date}\n\nСвободное время:\n" + "\n".join(result.times[:30])
         elif result.status == "EMPTY":
-            text = f"{ROOMS[room_key]['title']}\n{header}\n\nНет свободных слотов."
+            text = f"{ROOMS[room_key]['title']}\n{header}\n\nДата: {pretty_date}\n\nНет свободных слотов."
         else:
             msg = result.error or "Не удалось получить актуальные слоты. Попробуйте ещё раз."
-            text = f"{ROOMS[room_key]['title']}\n{header}\n\n{msg}"
+            text = f"{ROOMS[room_key]['title']}\n{header}\n\nДата: {pretty_date}\n\n{msg}"
 
         await q.edit_message_text(text, reply_markup=kb([
-            [InlineKeyboardButton("🔄 Обновить", callback_data=f"day:{day_offset}")],
+            [InlineKeyboardButton("🔄 Обновить", callback_data=f"date:{iso}")],
+            [InlineKeyboardButton("📅 Другой день", callback_data="pick_date")],
             [InlineKeyboardButton("↩️ Услуги", callback_data=f"room:{room_key}")],
             [InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")],
             [InlineKeyboardButton("✉️ Обратная связь", callback_data="feedback")],
         ]))
         return
 
+    if data == "pick_date":
+        room_key = context.user_data.get("room_key", "grey")
+        min_iso = context.user_data.get("cal_min_date") or date.today().isoformat()
+        min_date = parse_iso_day(min_iso)
+
+        y, m = min_date.year, min_date.month
+        await q.edit_message_text(
+            "Выберите дату (прошедшие дни недоступны):",
+            reply_markup=calendar_keyboard(y, m, min_date, room_key)
+        )
+        return
+
+
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.exception("Unhandled error: %s", context.error)
+
 
 def main():
     app = Application.builder().token("8451375652:AAE-h1hS5uCE7qSvxzSSBSRMW3s2_pbUu3Y").build()
@@ -1024,7 +1171,6 @@ def main():
 
     app.add_handler(CallbackQueryHandler(cb))
 
-    # Принимаем обратную связь (текст/фото/файл) только когда включён feedback_mode
     app.add_handler(MessageHandler(
         (filters.TEXT | filters.PHOTO | filters.Document.ALL) & (~filters.COMMAND),
         feedback_receive
@@ -1032,6 +1178,7 @@ def main():
 
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
     main()
