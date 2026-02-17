@@ -3,6 +3,7 @@ import logging
 import re
 import time
 import calendar as pycal
+
 from dataclasses import dataclass
 from datetime import datetime, timedelta, date
 from collections import Counter
@@ -33,7 +34,6 @@ from selenium.common.exceptions import TimeoutException, StaleElementReferenceEx
 
 from webdriver_manager.chrome import ChromeDriverManager
 
-
 # ---------------- config ----------------
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -41,10 +41,9 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logger = logging.getLogger("bumpix-bot")
 
-TOKEN = "PASTE_YOUR_NEW_TOKEN_HERE"   # <-- вставь токен
+TOKEN = "PASTE_YOUR_NEW_TOKEN_HERE"  # <-- вставь токен
 HEADLESS = True
-
-ADMIN_CHAT_ID = 0  # <-- chat_id для обратной связи (если нужно)
+ADMIN_CHAT_ID = 125030638  # <-- chat_id для обратной связи (если нужно)
 
 WAIT_POLL = 0.1
 EXECUTOR = ThreadPoolExecutor(max_workers=6)
@@ -55,14 +54,14 @@ CHROME_SERVICE = Service(CHROMEDRIVER_PATH)
 SEL_PICKER_CALENDAR = "div.picker_calendar"
 
 ROOMS = {
-    "grey":  {"title": "⚪ Серая комната",   "url": "https://bumpix.net/soundlevel"},
-    "blue":  {"title": "🔵 Синяя комната",   "url": "https://bumpix.net/500141"},
+    "grey": {"title": "⚪ Серая комната", "url": "https://bumpix.net/soundlevel"},
+    "blue": {"title": "🔵 Синяя комната", "url": "https://bumpix.net/500141"},
     "green": {"title": "🟢 Зелёная комната", "url": "https://bumpix.net/517424"},
 }
 
 CABINET_URL = "https://bumpix.net/soundlevel"
 
-# Мои записи — несколько локалей (на них бывает "Sign in required")
+# Мои записи — несколько локалей (на них бывает "Sign in required/Потрібна авторизація...")
 MY_RECORDS_URLS = [
     "https://bumpix.net/page/client-appointments",
     "https://bumpix.net/ru/page/client-appointments",
@@ -78,11 +77,16 @@ PAGE_SIZE = 20
 PROFILES_DIR = Path("./chrome_profiles").resolve()
 PROFILES_DIR.mkdir(parents=True, exist_ok=True)
 
+# UX: подсказки для телефона/логина
+PHONE_HINT = "Введите номер телефона (логин) в формате +7XXXXXXXXXX\nПример: +79991234567"
+PHONE_BAD = "Телефон некорректный. Формат: +7XXXXXXXXXX\nПример: +79991234567"
 
 # ---------------- telegram helpers ----------------
 
+
 def kb(rows):
     return InlineKeyboardMarkup(rows)
+
 
 async def safe_answer(q):
     try:
@@ -90,18 +94,23 @@ async def safe_answer(q):
     except BadRequest:
         pass
 
+
 def get_logged_flag(context: ContextTypes.DEFAULT_TYPE) -> bool:
-    # FIX: показываем “Мои записи” только после ВЕРИФИЦИРОВАННОГО входа
+    # показываем “Мои записи” только после ВЕРИФИЦИРОВАННОГО входа
     return bool(context.user_data.get("cab_verified_records"))
 
 
 # ---------------- feedback feature ----------------
 
+
 def feedback_keyboard():
-    return kb([
-        [InlineKeyboardButton("❌ Отмена", callback_data="feedback_cancel")],
-        [InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")],
-    ])
+    return kb(
+        [
+            [InlineKeyboardButton("❌ Отмена", callback_data="feedback_cancel")],
+            [InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")],
+        ]
+    )
+
 
 async def feedback_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["feedback_mode"] = True
@@ -114,6 +123,7 @@ async def feedback_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif update.callback_query:
         await update.callback_query.edit_message_text(txt, reply_markup=feedback_keyboard())
 
+
 async def feedback_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["feedback_mode"] = False
     logged = get_logged_flag(context)
@@ -121,6 +131,7 @@ async def feedback_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.edit_message_text("Отменено. Выберите комнату:", reply_markup=room_keyboard(logged))
     elif update.message:
         await update.message.reply_text("Отменено. Выберите комнату:", reply_markup=room_keyboard(logged))
+
 
 async def feedback_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("feedback_mode"):
@@ -130,13 +141,12 @@ async def feedback_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["feedback_mode"] = False
         await update.message.reply_text(
             "У автора бота не настроен ADMIN_CHAT_ID, поэтому я не могу переслать сообщение.",
-            reply_markup=room_keyboard(get_logged_flag(context))
+            reply_markup=room_keyboard(get_logged_flag(context)),
         )
         return
 
     user = update.effective_user
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
     username = f"@{user.username}" if user and user.username else "-"
     full_name = user.full_name if user else "-"
     user_id = user.id if user else "-"
@@ -150,57 +160,84 @@ async def feedback_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     msg = update.message
-
     try:
         if msg.text and not msg.text.startswith("/"):
             await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=header + "\n" + msg.text)
-
         elif msg.photo:
             photo = msg.photo[-1]
             cap = header + (("\n" + msg.caption) if msg.caption else "")
             await context.bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=photo.file_id, caption=cap[:1024])
-
         elif msg.document:
             cap = header + (("\n" + msg.caption) if msg.caption else "")
             await context.bot.send_document(chat_id=ADMIN_CHAT_ID, document=msg.document.file_id, caption=cap[:1024])
-
         else:
             await msg.reply_text("Пожалуйста, отправь текст, фото или файл.", reply_markup=feedback_keyboard())
             return
 
         context.user_data["feedback_mode"] = False
         await msg.reply_text("Спасибо! Я переслал сообщение автору.", reply_markup=room_keyboard(get_logged_flag(context)))
-
     except Exception as e:
         logger.exception("feedback send failed: %s", e)
         context.user_data["feedback_mode"] = False
         await msg.reply_text(
             "Не удалось переслать сообщение автору (ошибка отправки). Попробуйте позже.",
-            reply_markup=room_keyboard(get_logged_flag(context))
+            reply_markup=room_keyboard(get_logged_flag(context)),
         )
 
 
 # ---------------- cabinet feature (login/register + my records) ----------------
 
+
 def cabinet_menu_keyboard():
-    return kb([
-        [InlineKeyboardButton("🧾 Регистрация", callback_data="cab_reg")],
-        [InlineKeyboardButton("🔐 Вход", callback_data="cab_login")],
-        [InlineKeyboardButton("❌ Отмена", callback_data="cab_cancel")],
-        [InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")],
-    ])
+    return kb(
+        [
+            [InlineKeyboardButton("🧾 Регистрация", callback_data="cab_reg")],
+            [InlineKeyboardButton("🔐 Вход", callback_data="cab_login")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="cab_cancel")],
+            [InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")],
+        ]
+    )
+
 
 def cabinet_cancel_keyboard():
-    return kb([
-        [InlineKeyboardButton("❌ Отмена", callback_data="cab_cancel")],
-        [InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")],
-    ])
+    return kb(
+        [
+            [InlineKeyboardButton("❌ Отмена", callback_data="cab_cancel")],
+            [InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")],
+        ]
+    )
+
 
 def normalize_phone(s: str) -> str:
     s = (s or "").strip()
     s = s.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
     s = re.sub(r"[^0-9+]", "", s)
     return s
+
+
+def normalize_phone_ru_to_plus7(s: str) -> str:
+    """
+    Приводим ввод к виду +7XXXXXXXXXX (если возможно).
+    Принимаем: +7..., 7..., 8..., 10-значный без кода.
+    """
+    s = normalize_phone(s)
+    digits = re.sub(r"[^0-9]", "", s)
+
+    if len(digits) == 11 and digits.startswith("8"):
+        digits = "7" + digits[1:]
+    if len(digits) == 10:
+        digits = "7" + digits
+    if len(digits) == 11 and digits.startswith("7"):
+        return "+" + digits
+
+    # fallback — вернем как есть, валидация выше решит
+    return s
+
+
+def is_valid_ru_phone_plus7(s: str) -> bool:
+    digits = re.sub(r"[^0-9]", "", s or "")
+    return len(digits) == 11 and digits.startswith("7")
+
 
 async def cabinet_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["cabinet"] = {"active": True, "mode": None, "step": None, "data": {}}
@@ -216,6 +253,7 @@ async def cabinet_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.callback_query.edit_message_text(text, reply_markup=cabinet_menu_keyboard())
 
+
 async def cabinet_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("cabinet", None)
     logged = get_logged_flag(context)
@@ -226,6 +264,7 @@ async def cabinet_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------- selenium helpers ----------------
+
 
 def make_driver(headless: bool, profile_dir: Optional[Path]):
     opts = Options()
@@ -243,7 +282,6 @@ def make_driver(headless: bool, profile_dir: Optional[Path]):
     except Exception:
         pass
 
-    # FIX: постоянный профиль Chrome для сохранения cookies/localStorage
     if profile_dir is not None:
         profile_dir.mkdir(parents=True, exist_ok=True)
         opts.add_argument(f"--user-data-dir={str(profile_dir)}")
@@ -253,11 +291,11 @@ def make_driver(headless: bool, profile_dir: Optional[Path]):
     driver.set_page_load_timeout(35)
     return driver
 
+
 def open_page(driver, url: str):
     driver.get(url)
-    WebDriverWait(driver, 25, poll_frequency=WAIT_POLL).until(
-        EC.presence_of_element_located((By.TAG_NAME, "body"))
-    )
+    WebDriverWait(driver, 25, poll_frequency=WAIT_POLL).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+
 
 def robust_click(driver, el):
     try:
@@ -269,6 +307,7 @@ def robust_click(driver, el):
     except Exception:
         driver.execute_script("arguments[0].click();", el)
 
+
 def is_disabled_like(driver, el):
     try:
         disabled = el.get_attribute("disabled")
@@ -279,69 +318,84 @@ def is_disabled_like(driver, el):
     except Exception:
         return True
 
+
 def page_source_has_any(driver, needles: list[str]) -> bool:
     src = (driver.page_source or "").lower()
     return any(n.lower() in src for n in needles)
 
+
 def looks_like_auth_required(driver) -> bool:
-    # FIX: определяем "нужна авторизация" по HTML страницы, а не только по visible-тексту
-    return page_source_has_any(driver, [
-        "sign in required",
-        "you have not signed in yet",
-        "потрібна авторизація",
-        "ви ще не авторизовані",
-        "нужна авторизац",
-        "не авториз",
-        "registration",
-        "sign in",
-        "forgot password",
-    ])
+    return page_source_has_any(
+        driver,
+        [
+            "sign in required",
+            "you have not signed in yet",
+            "потрібна авторизація",
+            "ви ще не авторизовані",
+            "нужна авторизац",
+            "не авториз",
+            "registration",
+            "sign in",
+            "forgot password",
+        ],
+    )
+
 
 def looks_like_logged_in(driver) -> bool:
     return page_source_has_any(driver, ["выйти", "logout"])
 
+
 def _js_get_visible_modal_root(driver):
-    return driver.execute_script(r"""
-        function visible(el){
-          if (!el) return false;
-          const st = window.getComputedStyle(el);
-          if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
-          const r = el.getBoundingClientRect();
-          return r.width > 50 && r.height > 50;
-        }
-        const mods = Array.from(document.querySelectorAll('.modal, [role="dialog"]'));
-        for (const m of mods) {
-          if (visible(m)) return m;
-        }
-        return null;
-    """)
+    return driver.execute_script(
+        r"""
+function visible(el){
+  if (!el) return false;
+  const st = window.getComputedStyle(el);
+  if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
+  const r = el.getBoundingClientRect();
+  return r.width > 50 && r.height > 50;
+}
+
+const mods = Array.from(document.querySelectorAll('.modal, [role="dialog"]'));
+for (const m of mods) {
+  if (visible(m)) return m;
+}
+return null;
+"""
+    )
+
 
 def _js_modal_visible(driver) -> bool:
     return bool(_js_get_visible_modal_root(driver))
 
+
 def _js_find_and_click_by_text(driver, texts: list[str]) -> bool:
-    return driver.execute_script(r"""
-        const arr = (arguments[0] || []).map(x => String(x||'').trim().toLowerCase());
-        function visible(el){
-          if (!el) return false;
-          const st = window.getComputedStyle(el);
-          if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
-          const r = el.getBoundingClientRect();
-          return r.width > 10 && r.height > 10;
-        }
-        const nodes = Array.from(document.querySelectorAll('a,button,span,div'));
-        for (const n of nodes) {
-          const tx = (n.textContent || '').trim().toLowerCase();
-          if (!tx) continue;
-          if (!arr.includes(tx)) continue;
-          if (!visible(n)) continue;
-          const clickEl = n.closest('a,button') || n;
-          clickEl.scrollIntoView({block:'center'});
-          clickEl.click();
-          return true;
-        }
-        return false;
-    """, texts)
+    return driver.execute_script(
+        r"""
+const arr = (arguments[0] || []).map(x => String(x||'').trim().toLowerCase());
+function visible(el){
+  if (!el) return false;
+  const st = window.getComputedStyle(el);
+  if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
+  const r = el.getBoundingClientRect();
+  return r.width > 10 && r.height > 10;
+}
+const nodes = Array.from(document.querySelectorAll('a,button,span,div'));
+for (const n of nodes) {
+  const tx = (n.textContent || '').trim().toLowerCase();
+  if (!tx) continue;
+  if (!arr.includes(tx)) continue;
+  if (!visible(n)) continue;
+  const clickEl = n.closest('a,button') || n;
+  clickEl.scrollIntoView({block:'center'});
+  clickEl.click();
+  return true;
+}
+return false;
+""",
+        texts,
+    )
+
 
 def _find_input_in_modal_by_placeholder(driver, placeholder_sub: str, timeout=14):
     placeholder_sub = (placeholder_sub or "").strip().lower()
@@ -354,7 +408,6 @@ def _find_input_in_modal_by_placeholder(driver, placeholder_sub: str, timeout=14
             inputs = root.find_elements(By.CSS_SELECTOR, "input")
         except Exception:
             return False
-
         for inp in inputs:
             try:
                 ph = (inp.get_attribute("placeholder") or "").strip().lower()
@@ -365,6 +418,7 @@ def _find_input_in_modal_by_placeholder(driver, placeholder_sub: str, timeout=14
         return False
 
     return WebDriverWait(driver, timeout, poll_frequency=WAIT_POLL).until(cond)
+
 
 def _fill_input_sendkeys(inp, value: str):
     try:
@@ -381,20 +435,18 @@ def _fill_input_sendkeys(inp, value: str):
             pass
     inp.send_keys(value)
 
+
 def _click_modal_button_by_text(driver, text_variants: list[str]) -> bool:
     root = _js_get_visible_modal_root(driver)
     if not root:
         return False
-
     want = [t.strip().lower() for t in (text_variants or []) if t and t.strip()]
     if not want:
         return False
-
     try:
         btns = root.find_elements(By.CSS_SELECTOR, "button,a,input[type='button'],input[type='submit']")
     except Exception:
         return False
-
     for b in btns:
         try:
             tt = (b.get_attribute("value") if (b.tag_name or "").lower() == "input" else b.text) or ""
@@ -405,32 +457,37 @@ def _click_modal_button_by_text(driver, text_variants: list[str]) -> bool:
             continue
     return False
 
+
 def _read_modal_errors(driver) -> str:
-    return driver.execute_script(r"""
-        function visible(el){
-          if (!el) return false;
-          const st = window.getComputedStyle(el);
-          if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
-          const r = el.getBoundingClientRect();
-          return r.width > 10 && r.height > 8;
-        }
-        const root = (function(){
-          const mods = Array.from(document.querySelectorAll('.modal, [role="dialog"]'));
-          for (const m of mods) if (visible(m)) return m;
-          return document;
-        })();
-        const nodes = Array.from(root.querySelectorAll('.alert, .help-block, .text-danger, .error, .has-error'));
-        const texts = [];
-        for (const n of nodes) {
-          const t = (n.innerText || n.textContent || '').trim();
-          if (t && t.length <= 700) texts.push(t);
-        }
-        const uniq = [...new Set(texts)];
-        return uniq.join('\n');
-    """)
+    return driver.execute_script(
+        r"""
+function visible(el){
+  if (!el) return false;
+  const st = window.getComputedStyle(el);
+  if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
+  const r = el.getBoundingClientRect();
+  return r.width > 10 && r.height > 8;
+}
+
+const root = (function(){
+  const mods = Array.from(document.querySelectorAll('.modal, [role="dialog"]'));
+  for (const m of mods) if (visible(m)) return m;
+  return document;
+})();
+
+const nodes = Array.from(root.querySelectorAll('.alert, .help-block, .text-danger, .error, .has-error'));
+const texts = [];
+for (const n of nodes) {
+  const t = (n.innerText || n.textContent || '').trim();
+  if (t && t.length <= 700) texts.push(t);
+}
+const uniq = [...new Set(texts)];
+return uniq.join('\n');
+"""
+    )
+
 
 def verify_records_access(driver) -> bool:
-    # FIX: вход считаем выполненным только если “Мои записи” реально доступны
     for u in MY_RECORDS_URLS:
         try:
             open_page(driver, u)
@@ -444,23 +501,24 @@ def verify_records_access(driver) -> bool:
 
 # ---------------- string utils ----------------
 
+
 def clean_spaces(s: str) -> str:
     s = (s or "").replace("\u00a0", " ").replace("\u202f", " ")
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
+
 def tidy_service_title(name: str, duration: str, cost: str) -> str:
     name = clean_spaces(name)
     duration = clean_spaces(duration)
     cost = clean_spaces(cost)
-
     if cost:
         cost = re.sub(r"\s*(руб\.?|₽)\s*$", "", cost, flags=re.IGNORECASE).strip()
-        if cost:
-            cost = f"{cost} руб."
-
+    if cost:
+        cost = f"{cost} руб."
     parts = [p for p in (name, duration, cost) if p]
     return " — ".join(parts) if parts else ""
+
 
 def short_raw_service_fallback(raw: str) -> str:
     raw = clean_spaces(raw)
@@ -473,21 +531,29 @@ def short_raw_service_fallback(raw: str) -> str:
 
 # ---------------- timeBlocks helpers ----------------
 
+
 def get_timeblocks_html(driver):
-    return driver.execute_script("""
-        const tb = document.querySelector('#timeBlocks');
-        return tb ? (tb.innerHTML || '') : null;
-    """)
+    return driver.execute_script(
+        """
+const tb = document.querySelector('#timeBlocks');
+return tb ? (tb.innerHTML || '') : null;
+"""
+    )
+
 
 def get_timeblocks_text(driver):
-    return driver.execute_script("""
-        const tb = document.querySelector('#timeBlocks');
-        return tb ? (tb.innerText || '') : '';
-    """) or ""
+    return driver.execute_script(
+        """
+const tb = document.querySelector('#timeBlocks');
+return tb ? (tb.innerText || '') : '';
+"""
+    ) or ""
+
 
 def is_server_error_timeblocks(driver):
     low = (get_timeblocks_text(driver) or "").strip().lower()
     return ("servererror" in low) or ("при запросе к серверу произошла ошибка" in low) or ("попробуйте позже" in low)
+
 
 def is_placeholder_timeblocks(driver):
     txt = (get_timeblocks_text(driver) or "").strip()
@@ -495,16 +561,17 @@ def is_placeholder_timeblocks(driver):
         return True
     return bool(re.fullmatch(r"[.\s]+", txt))
 
+
 def wait_timeblocks_changed(driver, prev_html, timeout=10):
     WebDriverWait(driver, timeout, poll_frequency=WAIT_POLL).until(
         lambda d: (get_timeblocks_html(d) or "") != (prev_html or "")
     )
 
+
 def wait_timeblocks_stable(driver, timeout=12, stable_for_sec=0.7):
     end = time.time() + timeout
     last = None
     last_change = time.time()
-
     while time.time() < end:
         cur = get_timeblocks_html(driver) or ""
         if last is None:
@@ -517,8 +584,8 @@ def wait_timeblocks_stable(driver, timeout=12, stable_for_sec=0.7):
             if time.time() - last_change >= stable_for_sec:
                 return True
         time.sleep(0.1)
-
     raise TimeoutException("timeBlocks did not become stable")
+
 
 def wait_timeblocks_not_placeholder(driver, timeout=10):
     WebDriverWait(driver, timeout, poll_frequency=WAIT_POLL).until(
@@ -528,53 +595,57 @@ def wait_timeblocks_not_placeholder(driver, timeout=10):
 
 # ---------------- slot parsing ----------------
 
+
 def extract_times_now(driver):
-    times_raw = driver.execute_script(r"""
-        const tb = document.querySelector('#timeBlocks');
-        if (!tb) return [];
+    times_raw = driver.execute_script(
+        r"""
+const tb = document.querySelector('#timeBlocks');
+if (!tb) return [];
 
-        const isHidden = (el) => {
-          const st = window.getComputedStyle(el);
-          return st.display === 'none' || st.visibility === 'hidden';
-        };
+const isHidden = (el) => {
+  const st = window.getComputedStyle(el);
+  return st.display === 'none' || st.visibility === 'hidden';
+};
 
-        const isDisabled = (el) => {
-          if (!el) return true;
-          const cls = (el.getAttribute('class') || '').toLowerCase();
-          const aria = (el.getAttribute('aria-disabled') || '').toLowerCase();
-          const disabled = el.getAttribute('disabled');
-          const pe = window.getComputedStyle(el).pointerEvents;
-          return !!disabled || aria === 'true' || cls.includes('disabled') || pe === 'none';
-        };
+const isDisabled = (el) => {
+  if (!el) return true;
+  const cls = (el.getAttribute('class') || '').toLowerCase();
+  const aria = (el.getAttribute('aria-disabled') || '').toLowerCase();
+  const disabled = el.getAttribute('disabled');
+  const pe = window.getComputedStyle(el).pointerEvents;
+  return !!disabled || aria === 'true' || cls.includes('disabled') || pe === 'none';
+};
 
-        const nodes = Array.from(tb.querySelectorAll('label,button,a'));
-        const out = [];
-        const re = /\b\d{1,2}:\d{2}\b/;
+const nodes = Array.from(tb.querySelectorAll('label,button,a'));
+const out = [];
+const re = /\b\d{1,2}:\d{2}\b/;
 
-        for (const el of nodes) {
-          if (isHidden(el)) continue;
+for (const el of nodes) {
+  if (isHidden(el)) continue;
 
-          const tag = el.tagName.toLowerCase();
-          let ok = false;
+  const tag = el.tagName.toLowerCase();
+  let ok = false;
 
-          if (tag === 'label') {
-            const inpInside = el.querySelector('input');
-            const htmlFor = (el.getAttribute('for') || '').trim();
-            const cls = (el.getAttribute('class') || '').toLowerCase();
-            ok = !!inpInside || !!htmlFor || cls.includes('btn-time');
-            if (inpInside && isDisabled(inpInside)) ok = false;
-          } else {
-            ok = true;
-          }
+  if (tag === 'label') {
+    const inpInside = el.querySelector('input');
+    const htmlFor = (el.getAttribute('for') || '').trim();
+    const cls = (el.getAttribute('class') || '').toLowerCase();
+    ok = !!inpInside || !!htmlFor || cls.includes('btn-time');
+    if (inpInside && isDisabled(inpInside)) ok = false;
+  } else {
+    ok = true;
+  }
 
-          if (!ok) continue;
-          if (isDisabled(el)) continue;
+  if (!ok) continue;
+  if (isDisabled(el)) continue;
 
-          const t = (el.textContent || el.innerText || '').trim();
-          if (re.test(t)) out.push(t);
-        }
-        return out;
-    """)
+  const t = (el.textContent || el.innerText || '').trim();
+  if (re.test(t)) out.push(t);
+}
+
+return out;
+"""
+    )
 
     if not times_raw:
         txt = get_timeblocks_text(driver) or ""
@@ -590,6 +661,7 @@ def extract_times_now(driver):
             seen.add(v)
             out.append(v)
     return out
+
 
 def parse_times_mode(driver, tries=26, sleep_sec=0.2, min_votes=2):
     samples = []
@@ -612,80 +684,79 @@ def parse_times_mode(driver, tries=26, sleep_sec=0.2, min_votes=2):
 
 # ---------------- services parsing ----------------
 
+
 @dataclass(frozen=True)
 class ServiceItem:
     sid: str
     title: str
 
+
 def bumpix_get_services_with_driver(driver, url: str):
     open_page(driver, url)
-
     WebDriverWait(driver, 18, poll_frequency=WAIT_POLL).until(
-        lambda d: (d.execute_script(
-            "return document.querySelectorAll('input.data_service[data-service-id]').length"
-        ) or 0) > 0
+        lambda d: (d.execute_script("return document.querySelectorAll('input.data_service[data-service-id]').length") or 0)
+        > 0
     )
 
-    rows = driver.execute_script(r"""
-        const inputs = Array.from(document.querySelectorAll('input.data_service[data-service-id]'));
-        const out = [];
-        for (const input of inputs) {
-          const item = input.closest('div.master_service_item') || input.closest('[class*="master_service_item"]');
-          const id = (input.getAttribute('data-service-id') || '').trim();
-          if (!item || !id) continue;
-
-          const name = (item.querySelector('.msn_body')?.textContent || '').trim();
-          const duration = (item.querySelector('.sduration')?.textContent || '').trim();
-          const cost = (item.querySelector('.scost')?.textContent || '').trim();
-          const raw = (item.innerText || '').trim();
-
-          out.push({id, name, duration, cost, raw});
-        }
-        return out;
-    """)
+    rows = driver.execute_script(
+        r"""
+const inputs = Array.from(document.querySelectorAll('input.data_service[data-service-id]'));
+const out = [];
+for (const input of inputs) {
+  const item = input.closest('div.master_service_item') || input.closest('[class*="master_service_item"]');
+  const id = (input.getAttribute('data-service-id') || '').trim();
+  if (!item || !id) continue;
+  const name = (item.querySelector('.msn_body')?.textContent || '').trim();
+  const duration = (item.querySelector('.sduration')?.textContent || '').trim();
+  const cost = (item.querySelector('.scost')?.textContent || '').trim();
+  const raw = (item.innerText || '').trim();
+  out.push({id, name, duration, cost, raw});
+}
+return out;
+"""
+    )
 
     services = []
     seen = set()
-
     for r in rows:
         sid = clean_spaces(r.get("id"))
         if not sid or sid in seen:
             continue
-
         name = r.get("name") or ""
         duration = r.get("duration") or ""
         cost = r.get("cost") or ""
         raw = r.get("raw") or ""
-
         title = tidy_service_title(name, duration, cost)
         if not title:
             title = short_raw_service_fallback(raw)
-
         if title:
             seen.add(sid)
             services.append(ServiceItem(sid=sid, title=title))
-
     return services
 
 
 # ---------------- selecting services ----------------
 
+
 def clear_all_services(driver):
-    driver.execute_script(r"""
-        const inputs = Array.from(document.querySelectorAll('input.data_service[data-service-id]'));
-        for (const inp of inputs) {
-          const label = inp.closest('label');
-          if (inp.checked) {
-            inp.checked = false;
-            inp.dispatchEvent(new Event('input', {bubbles:true}));
-            inp.dispatchEvent(new Event('change', {bubbles:true}));
-          }
-          if (label && label.classList.contains('active')) {
-            label.classList.remove('active');
-          }
-        }
-    """)
+    driver.execute_script(
+        r"""
+const inputs = Array.from(document.querySelectorAll('input.data_service[data-service-id]'));
+for (const inp of inputs) {
+  const label = inp.closest('label');
+  if (inp.checked) {
+    inp.checked = false;
+    inp.dispatchEvent(new Event('input', {bubbles:true}));
+    inp.dispatchEvent(new Event('change', {bubbles:true}));
+    if (label && label.classList.contains('active')) {
+      label.classList.remove('active');
+    }
+  }
+}
+"""
+    )
     time.sleep(0.12)
+
 
 def click_service_by_id(driver, sid: str):
     for _ in range(8):
@@ -693,6 +764,7 @@ def click_service_by_id(driver, sid: str):
             inp = WebDriverWait(driver, 10, poll_frequency=WAIT_POLL).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, f"input.data_service[data-service-id='{sid}']"))
             )
+
             label = None
             try:
                 label = driver.execute_script("return arguments[0].closest('label')", inp)
@@ -704,55 +776,60 @@ def click_service_by_id(driver, sid: str):
             else:
                 robust_click(driver, inp)
 
-            driver.execute_script(r"""
-                const inp = arguments[0];
-                const label = inp.closest('label');
-                inp.checked = true;
-                inp.dispatchEvent(new Event('input', {bubbles:true}));
-                inp.dispatchEvent(new Event('change', {bubbles:true}));
-                if (label) label.classList.add('active');
-            """, inp)
+            driver.execute_script(
+                r"""
+const inp = arguments[0];
+const label = inp.closest('label');
+inp.checked = true;
+inp.dispatchEvent(new Event('input', {bubbles:true}));
+inp.dispatchEvent(new Event('change', {bubbles:true}));
+if (label) label.classList.add('active');
+""",
+                inp,
+            )
             return
-
         except StaleElementReferenceException:
             time.sleep(0.12)
             continue
-
     raise RuntimeError(f"Не удалось выбрать услугу {sid} (stale).")
+
 
 def wait_services_selected(driver, sids, timeout=15):
     sids = list(map(str, sids))
 
     def cond(d):
-        return d.execute_script(r"""
-            const sids = arguments[0];
-
-            function selected(sid) {
-              const inp = document.querySelector(`input.data_service[data-service-id="${sid}"]`);
-              if (!inp) return false;
-              const label = inp.closest('label');
-              const checked = !!inp.checked;
-              const active = label ? label.classList.contains('active') : false;
-              return checked || active;
-            }
-
-            for (const sid of sids) {
-              if (!selected(sid)) return false;
-            }
-            return true;
-        """, sids)
+        return d.execute_script(
+            r"""
+const sids = arguments[0];
+function selected(sid) {
+  const inp = document.querySelector(`input.data_service[data-service-id="${sid}"]`);
+  if (!inp) return false;
+  const label = inp.closest('label');
+  const checked = !!inp.checked;
+  const active = label ? label.classList.contains('active') : false;
+  return checked || active;
+}
+for (const sid of sids) {
+  if (!selected(sid)) return false;
+}
+return true;
+""",
+            sids,
+        )
 
     WebDriverWait(driver, timeout, poll_frequency=WAIT_POLL).until(cond)
+
 
 def select_services(driver, sids):
     clear_all_services(driver)
     for sid in sids:
         click_service_by_id(driver, str(sid))
-        time.sleep(0.08)
+    time.sleep(0.08)
     wait_services_selected(driver, sids, timeout=15)
 
 
 # ---------------- choose time ----------------
+
 
 def find_choose_time_button(driver):
     xpaths = [
@@ -782,6 +859,7 @@ def find_choose_time_button(driver):
 
     return None
 
+
 def click_choose_time(driver, timeout=22):
     def cond(d):
         el = find_choose_time_button(d)
@@ -797,64 +875,76 @@ def click_choose_time(driver, timeout=22):
 
 # ---------------- calendar/date selection (UTC safe) ----------------
 
+
 def wait_calendar_visible(driver, timeout=14):
     WebDriverWait(driver, timeout, poll_frequency=WAIT_POLL).until(
         EC.visibility_of_element_located((By.CSS_SELECTOR, SEL_PICKER_CALENDAR))
     )
+
 
 def wait_calendar_days_present_js(driver, timeout=14):
     WebDriverWait(driver, timeout, poll_frequency=WAIT_POLL).until(
         lambda d: (d.execute_script("return document.querySelectorAll('td.day').length") or 0) > 0
     )
 
+
 def click_calendar_nav(driver, direction: str):
-    btn = driver.execute_script(r"""
-        const dir = arguments[0];
-        const root = document.querySelector('.picker_calendar') || document;
-        const th = root.querySelector(`.datepicker-days th.${dir}`) || root.querySelector(`th.${dir}`);
-        return th || null;
-    """, direction)
+    btn = driver.execute_script(
+        r"""
+const dir = arguments[0];
+const root = document.querySelector('.picker_calendar') || document;
+const th = root.querySelector(`.datepicker-days th.${dir}`) || root.querySelector(`th.${dir}`);
+return th || null;
+""",
+        direction,
+    )
     if btn:
         robust_click(driver, btn)
-        time.sleep(0.12)
+    time.sleep(0.12)
+
 
 def get_calendar_view_year_month_utc(driver):
-    res = driver.execute_script(r"""
-        const root = document.querySelector('.picker_calendar') || document;
-        const cells = Array.from(root.querySelectorAll('td.day'));
-        for (const c of cells) {
-          const cls = c.getAttribute('class') || '';
-          if (cls.includes('old') || cls.includes('new') || cls.includes('disabled')) continue;
-          const ms = c.getAttribute('data-date');
-          if (!ms) continue;
-          const dt = new Date(Number(ms));
-          return {y: dt.getUTCFullYear(), m: dt.getUTCMonth()};
-        }
-        return null;
-    """)
+    res = driver.execute_script(
+        r"""
+const root = document.querySelector('.picker_calendar') || document;
+const cells = Array.from(root.querySelectorAll('td.day'));
+for (const c of cells) {
+  const cls = c.getAttribute('class') || '';
+  if (cls.includes('old') || cls.includes('new') || cls.includes('disabled')) continue;
+  const ms = c.getAttribute('data-date');
+  if (!ms) continue;
+  const dt = new Date(Number(ms));
+  return {y: dt.getUTCFullYear(), m: dt.getUTCMonth()};
+}
+return null;
+"""
+    )
     if not res:
         return None
     return int(res.get("y")), int(res.get("m"))
 
+
 def find_day_cell_for_date_utc(driver, y: int, m0: int, d: int):
-    return driver.execute_script(r"""
-        const y = arguments[0], m = arguments[1], d = arguments[2];
-        const root = document.querySelector('.picker_calendar') || document;
-        const tds = Array.from(root.querySelectorAll('td.day'));
-        for (const c of tds) {
-          const cls = c.getAttribute('class') || '';
-          if (cls.includes('old') || cls.includes('new') || cls.includes('disabled')) continue;
+    return driver.execute_script(
+        r"""
+const y = arguments[0], m = arguments[1], d = arguments[2];
+const root = document.querySelector('.picker_calendar') || document;
+const tds = Array.from(root.querySelectorAll('td.day'));
+for (const c of tds) {
+  const cls = c.getAttribute('class') || '';
+  if (cls.includes('old') || cls.includes('new') || cls.includes('disabled')) continue;
+  const ms = c.getAttribute('data-date');
+  if (!ms) continue;
+  const dt = new Date(Number(ms));
+  if (dt.getUTCFullYear() === y && dt.getUTCMonth() === m && dt.getUTCDate() === d) return c;
+}
+return null;
+""",
+        int(y),
+        int(m0),
+        int(d),
+    )
 
-          const ms = c.getAttribute('data-date');
-          if (!ms) continue;
-
-          const dt = new Date(Number(ms));
-          if (dt.getUTCFullYear() === y && dt.getUTCMonth() === m && dt.getUTCDate() === d) {
-            return c;
-          }
-        }
-        return null;
-    """, int(y), int(m0), int(d))
 
 def click_specific_date(driver, target_date: date):
     try:
@@ -863,7 +953,6 @@ def click_specific_date(driver, target_date: date):
         pass
 
     wait_calendar_days_present_js(driver, timeout=14)
-
     y, m0, d = target_date.year, target_date.month - 1, target_date.day
     prev = get_timeblocks_html(driver) or ""
 
@@ -891,7 +980,7 @@ def click_specific_date(driver, target_date: date):
                     cell = find_day_cell_for_date_utc(driver, y, m0, d)
                     if not cell:
                         break
-            continue
+                    continue
 
         view = get_calendar_view_year_month_utc(driver)
         if not view:
@@ -904,7 +993,6 @@ def click_specific_date(driver, target_date: date):
             click_calendar_nav(driver, "next")
         else:
             click_calendar_nav(driver, "prev")
-
         wait_calendar_days_present_js(driver, timeout=14)
 
     raise RuntimeError("Не удалось выбрать дату в календаре.")
@@ -912,16 +1000,17 @@ def click_specific_date(driver, target_date: date):
 
 # ---------------- main scenario ----------------
 
+
 @dataclass(frozen=True)
 class TimesResult:
     status: str  # "OK" | "EMPTY" | "ERROR"
     times: list[str]
     error: Optional[str] = None
 
+
 def get_times_for_selection(driver, url: str, sids, target_date: date) -> TimesResult:
     open_page(driver, url)
     select_services(driver, sids)
-
     click_choose_time(driver, timeout=22)
     wait_calendar_visible(driver, timeout=14)
 
@@ -942,28 +1031,24 @@ def get_times_for_selection(driver, url: str, sids, target_date: date) -> TimesR
             return TimesResult(status="EMPTY", times=[])
 
         time.sleep(0.5)
+        driver.refresh()
+        WebDriverWait(driver, 25, poll_frequency=WAIT_POLL).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        select_services(driver, sids)
+        click_choose_time(driver, timeout=22)
+        wait_calendar_visible(driver, timeout=14)
 
-    driver.refresh()
-    WebDriverWait(driver, 25, poll_frequency=WAIT_POLL).until(
-        EC.presence_of_element_located((By.TAG_NAME, "body"))
-    )
-
-    select_services(driver, sids)
-    click_choose_time(driver, timeout=22)
-    wait_calendar_visible(driver, timeout=14)
     click_specific_date(driver, target_date)
-
     if is_server_error_timeblocks(driver):
         return TimesResult(status="ERROR", times=[], error="Ошибка сервера при получении слотов")
 
     times = parse_times_mode(driver, tries=28, sleep_sec=0.2, min_votes=1)
     if times:
         return TimesResult(status="OK", times=times)
-
     return TimesResult(status="EMPTY", times=[])
 
 
 # ---------------- Cabinet Selenium logic ----------------
+
 
 @dataclass(frozen=True)
 class AuthResult:
@@ -971,29 +1056,28 @@ class AuthResult:
     message: str
     verified_records: bool = False
 
+
 @dataclass(frozen=True)
 class RecordsResult:
     ok: bool
     records: list[str]
     message: str
 
+
 def cabinet_login_with_driver(driver, url: str, phone: str, password: str) -> AuthResult:
     open_page(driver, url)
 
-    # если уже залогинен и записи доступны — сразу успех
     if looks_like_logged_in(driver) and verify_records_access(driver):
         return AuthResult(True, "Сессия уже активна, «Мои записи» доступны.", verified_records=True)
 
     _js_find_and_click_by_text(driver, ["вход", "войти", "sign in", "login"])
     WebDriverWait(driver, 14, poll_frequency=WAIT_POLL).until(lambda d: _js_modal_visible(d))
 
-    # телефон
     try:
         inp_phone = _find_input_in_modal_by_placeholder(driver, "телефон", timeout=10)
     except TimeoutException:
         inp_phone = _find_input_in_modal_by_placeholder(driver, "номер", timeout=10)
 
-    # пароль
     inp_pass = _find_input_in_modal_by_placeholder(driver, "парол", timeout=10)
 
     _fill_input_sendkeys(inp_phone, phone)
@@ -1003,27 +1087,20 @@ def cabinet_login_with_driver(driver, url: str, phone: str, password: str) -> Au
     if not _click_modal_button_by_text(driver, ["войти", "вход", "sign in"]):
         return AuthResult(False, "Не нашёл кнопку «Войти/Sign in» в модалке.", verified_records=False)
 
-    # ждём: ошибка / закрытие модалки / logout
     t_end = time.time() + 18
     while time.time() < t_end:
         err = _read_modal_errors(driver)
         if err:
             return AuthResult(False, err, verified_records=False)
-
         if not _js_modal_visible(driver):
             break
-
         if looks_like_logged_in(driver):
             break
-
         time.sleep(0.25)
 
-    # сессия часто становится валидной после refresh
     try:
         driver.refresh()
-        WebDriverWait(driver, 18, poll_frequency=WAIT_POLL).until(
-            EC.presence_of_element_located((By.TAG_NAME, "body"))
-        )
+        WebDriverWait(driver, 18, poll_frequency=WAIT_POLL).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
     except Exception:
         pass
 
@@ -1031,15 +1108,15 @@ def cabinet_login_with_driver(driver, url: str, phone: str, password: str) -> Au
     if err:
         return AuthResult(False, err, verified_records=False)
 
-    # FIX: проверка фактического входа = доступность "Мои записи"
     if verify_records_access(driver):
         return AuthResult(True, "Вход подтверждён: «Мои записи» доступны.", verified_records=True)
 
     return AuthResult(
         False,
         "Вход не подтверждён: «Мои записи» всё ещё требуют авторизацию (возможно, вход не прошёл или аккаунт не имеет доступа к этой странице).",
-        verified_records=False
+        verified_records=False,
     )
+
 
 def cabinet_register_with_driver(driver, url: str, name: str, phone: str, password: str, password2: str) -> AuthResult:
     open_page(driver, url)
@@ -1053,7 +1130,6 @@ def cabinet_register_with_driver(driver, url: str, name: str, phone: str, passwo
 
     inp_phone = _find_input_in_modal_by_placeholder(driver, "телефон", timeout=10)
     inp_pass = _find_input_in_modal_by_placeholder(driver, "парол", timeout=10)
-
     try:
         inp_pass2 = _find_input_in_modal_by_placeholder(driver, "повтор", timeout=10)
     except TimeoutException:
@@ -1062,10 +1138,13 @@ def cabinet_register_with_driver(driver, url: str, name: str, phone: str, passwo
     if inp_name:
         _fill_input_sendkeys(inp_name, name)
         time.sleep(0.05)
+
     _fill_input_sendkeys(inp_phone, phone)
     time.sleep(0.05)
+
     _fill_input_sendkeys(inp_pass, password)
     time.sleep(0.05)
+
     if inp_pass2:
         _fill_input_sendkeys(inp_pass2, password2)
 
@@ -1084,60 +1163,75 @@ def cabinet_register_with_driver(driver, url: str, name: str, phone: str, passwo
     err = _read_modal_errors(driver)
     return AuthResult(False, err or "Не удалось определить результат регистрации.", verified_records=False)
 
+
 def _js_extract_my_records(driver) -> list[str]:
-    return driver.execute_script(r"""
-        function visible(el){
-          if (!el) return false;
-          const st = window.getComputedStyle(el);
-          if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
-          const r = el.getBoundingClientRect();
-          return r.width > 20 && r.height > 10;
-        }
+    return driver.execute_script(
+        r"""
+function visible(el){
+  if (!el) return false;
+  const st = window.getComputedStyle(el);
+  if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
+  const r = el.getBoundingClientRect();
+  return r.width > 20 && r.height > 10;
+}
 
-        const nodes = Array.from(document.querySelectorAll('div,li,article,section,main'))
-          .filter(visible);
+const nodes = Array.from(document.querySelectorAll('div,li,article,section,main')).filter(visible);
 
-        const out = [];
-        const seen = new Set();
+const out = [];
+const seen = new Set();
 
-        const reDate = /\b\d{1,2}\s+[A-Za-zА-Яа-яЁёІіЇїЄє]+(?:\s+\d{4})?\b/;
-        const reDate2 = /\b\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4}\b/;
-        const reTime = /\b\d{1,2}:\d{2}\b/;
+const reDate = /\b\d{1,2}\s+[A-Za-zА-Яа-яЁёІіЇїЄє]+(?:\s+\d{4})?\b/;
+const reDate2 = /\b\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4}\b/;
+const reTime = /\b\d{1,2}:\d{2}\b/;
 
-        for (const el of nodes) {
-          let tx = (el.innerText || '').trim();
-          if (!tx) continue;
+function isJunkLine(s){
+  const t = (s || '').trim();
+  if (!t) return true;
+  const l = t.toLowerCase();
+  if (l === 'отзыв') return true;
+  if (l === 'новая запись') return true;
+  if (l.includes('отзыв') && t.length <= 20) return true;
+  if (l.includes('новая запись') && t.length <= 30) return true;
+  return false;
+}
 
-          if (tx.length < 50 || tx.length > 1200) continue;
+for (const el of nodes) {
+  let tx = (el.innerText || '').trim();
+  if (!tx) continue;
+  if (tx.length < 50 || tx.length > 1200) continue;
 
-          const low = tx.toLowerCase();
-          if (!(low.includes('комнат') || low.includes('room'))) continue;
+  const low = tx.toLowerCase();
+  if (!(low.includes('комнат') || low.includes('room'))) continue;
 
-          const hasDate = reDate.test(tx) || reDate2.test(tx);
-          const hasTime = reTime.test(tx);
-          const hasMoney = low.includes('руб') || low.includes('uah') || low.includes('$');
-          const hasStatus = low.includes('заверш') || low.includes('отмен') || low.includes('актив')
-                            || low.includes('cancel') || low.includes('moved');
+  const hasDate = reDate.test(tx) || reDate2.test(tx);
+  const hasTime = reTime.test(tx);
+  const hasMoney = low.includes('руб') || low.includes('uah') || low.includes('$');
+  const hasStatus = low.includes('заверш') || low.includes('отмен') || low.includes('актив') || low.includes('cancel') || low.includes('moved');
 
-          if (!((hasDate || hasTime) && (hasMoney || hasStatus))) continue;
+  if (!((hasDate || hasTime) && (hasMoney || hasStatus))) continue;
 
-          tx = tx.replace(/\u00a0/g, ' ')
-                 .replace(/[ \t]+\n/g, '\n')
-                 .replace(/\n{3,}/g, '\n\n')
-                 .trim();
+  tx = tx.replace(/\u00a0/g, ' ')
+         .replace(/[ \t]+\n/g, '\n')
+         .replace(/\n{3,}/g, '\n\n')
+         .trim();
 
-          const key = tx.slice(0, 180);
-          if (seen.has(key)) continue;
-          seen.add(key);
+  const key = tx.slice(0, 180);
+  if (seen.has(key)) continue;
+  seen.add(key);
 
-          const lines = tx.split('\n').map(s => s.trim()).filter(Boolean);
-          out.push(lines.slice(0, 14).join('\n'));
+  const lines = tx.split('\n')
+                  .map(s => (s || '').trim())
+                  .filter(Boolean)
+                  .filter(s => !isJunkLine(s));
 
-          if (out.length >= 40) break;
-        }
+  out.push(lines.slice(0, 14).join('\n'));
+  if (out.length >= 40) break;
+}
 
-        return out;
-    """)
+return out;
+"""
+    )
+
 
 def cabinet_open_my_records_with_driver(driver) -> RecordsResult:
     last_url = None
@@ -1153,18 +1247,17 @@ def cabinet_open_my_records_with_driver(driver) -> RecordsResult:
 
     if last_url is None:
         return RecordsResult(False, [], "Не удалось открыть страницу «Мои записи» (URL не загрузились).")
-
     if looks_like_auth_required(driver):
         return RecordsResult(False, [], "Нужна авторизация. Страница записей просит вход.")
 
     recs = _js_extract_my_records(driver) or []
     if not recs:
         return RecordsResult(True, [], "Записей не найдено (возможно, их нет).")
-
     return RecordsResult(True, recs, f"Найдено записей: {len(recs)}")
 
 
 # ---------------- Workers: per Telegram user ----------------
+
 
 class ServicesCache:
     def __init__(self):
@@ -1186,6 +1279,7 @@ class ServicesCache:
         with self.lock:
             self.by_url[url] = list(items)
             self.ts_by_url[url] = time.time()
+
 
 SERVICES_CACHE = ServicesCache()
 
@@ -1213,7 +1307,6 @@ class BumpixUserWorker:
         cached = SERVICES_CACHE.get(url)
         if cached:
             return cached
-
         with self.lock:
             self._ensure_driver()
             try:
@@ -1222,7 +1315,6 @@ class BumpixUserWorker:
                 self.reset_driver()
                 self._ensure_driver()
                 services = bumpix_get_services_with_driver(self.driver, url)
-
             SERVICES_CACHE.put(url, services)
             return services
 
@@ -1282,6 +1374,7 @@ class BumpixUserWorker:
 WORKERS: dict[int, BumpixUserWorker] = {}
 WORKERS_LOCK = RLock()
 
+
 def get_worker_for_update(update: Update) -> BumpixUserWorker:
     uid = update.effective_user.id
     with WORKERS_LOCK:
@@ -1292,7 +1385,8 @@ def get_worker_for_update(update: Update) -> BumpixUserWorker:
         return w
 
 
-# ---------------- UI: rooms/services/calendar ----------------
+# ---------------- UI: rooms/services/calendar/times ----------------
+
 
 def room_keyboard(logged_in: bool):
     rows = [
@@ -1300,14 +1394,17 @@ def room_keyboard(logged_in: bool):
         [InlineKeyboardButton(ROOMS["blue"]["title"], callback_data="room:blue")],
         [InlineKeyboardButton(ROOMS["green"]["title"], callback_data="room:green")],
     ]
+
     if logged_in:
         rows.append([InlineKeyboardButton("📒 Мои записи", callback_data="my_records")])
+
     rows += [
         [InlineKeyboardButton("👤 Личный кабинет", callback_data="cabinet")],
         [InlineKeyboardButton("✉️ Обратная связь", callback_data="feedback")],
         [InlineKeyboardButton("🧹 Сбросить веб-сессию", callback_data="reset_web")],
     ]
     return kb(rows)
+
 
 def services_keyboard(services, selected_idx_set, page: int, room_key: str, logged_in: bool):
     total = len(services)
@@ -1331,13 +1428,43 @@ def services_keyboard(services, selected_idx_set, page: int, room_key: str, logg
     if nav:
         rows.append(nav)
 
-    rows.append([
-        InlineKeyboardButton("✅ Далее", callback_data="next"),
-        InlineKeyboardButton("🧹 Сброс", callback_data="reset"),
-    ])
+    rows.append([InlineKeyboardButton("✅ Далее", callback_data="next"), InlineKeyboardButton("🧹 Сброс", callback_data="reset")])
     rows.append([InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")])
+
     if logged_in:
         rows.append([InlineKeyboardButton("📒 Мои записи", callback_data="my_records")])
+
+    rows.append([InlineKeyboardButton("👤 Личный кабинет", callback_data="cabinet")])
+    rows.append([InlineKeyboardButton("✉️ Обратная связь", callback_data="feedback")])
+    rows.append([InlineKeyboardButton("🧹 Сбросить веб-сессию", callback_data="reset_web")])
+
+    return kb(rows)
+
+
+def times_keyboard(times: list[str], iso: str, room_key: str, logged_in: bool, selected: Optional[str] = None):
+    times = (times or [])[:30]
+    rows = []
+
+    per_row = 4
+    for i in range(0, len(times), per_row):
+        chunk = times[i : i + per_row]
+        row = []
+        for t in chunk:
+            label = f"✅ {t}" if selected == t else t
+            row.append(InlineKeyboardButton(label, callback_data=f"time:{iso}:{t}"))
+        rows.append(row)
+
+    rows.append(
+        [
+            InlineKeyboardButton("🔄 Обновить", callback_data=f"date:{iso}"),
+            InlineKeyboardButton("📅 Другой день", callback_data="pick_date"),
+        ]
+    )
+    rows.append([InlineKeyboardButton("↩️ Услуги", callback_data=f"room:{room_key}"), InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")])
+
+    if logged_in:
+        rows.append([InlineKeyboardButton("📒 Мои записи", callback_data="my_records")])
+
     rows.append([InlineKeyboardButton("👤 Личный кабинет", callback_data="cabinet")])
     rows.append([InlineKeyboardButton("✉️ Обратная связь", callback_data="feedback")])
     rows.append([InlineKeyboardButton("🧹 Сбросить веб-сессию", callback_data="reset_web")])
@@ -1346,11 +1473,9 @@ def services_keyboard(services, selected_idx_set, page: int, room_key: str, logg
 
 # ---------------- Inline calendar (Telegram UI) ----------------
 
-RU_MONTHS = [
-    "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
-    "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"
-]
+RU_MONTHS = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
 RU_DOW = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
 
 def clamp_month(year: int, month: int):
     while month < 1:
@@ -1361,22 +1486,28 @@ def clamp_month(year: int, month: int):
         year += 1
     return year, month
 
+
 def ym_add(year: int, month: int, delta_months: int):
     return clamp_month(year, month + delta_months)
+
 
 def parse_ym(s: str):
     y, m = s.split("-", 1)
     return int(y), int(m)
 
+
 def iso_day(y: int, m: int, d: int) -> str:
     return f"{y:04d}-{m:02d}-{d:02d}"
+
 
 def parse_iso_day(s: str) -> date:
     y, m, d = s.split("-", 2)
     return date(int(y), int(m), int(d))
 
+
 def calendar_keyboard(year: int, month: int, min_date: date, room_key: str, logged_in: bool):
     max_date = min_date + timedelta(days=MAX_DAYS_AHEAD)
+
     min_ym = (min_date.year, min_date.month)
     cur_ym = (year, month)
     max_ym = (max_date.year, max_date.month)
@@ -1385,12 +1516,12 @@ def calendar_keyboard(year: int, month: int, min_date: date, room_key: str, logg
     next_enabled = cur_ym < max_ym
 
     rows = []
-    nav = []
-    nav.append(InlineKeyboardButton("⬅️" if prev_enabled else " ", callback_data=f"calnav:{year:04d}-{month:02d}:-1" if prev_enabled else "calnoop"))
-    nav.append(InlineKeyboardButton(f"{RU_MONTHS[month-1]} {year}", callback_data="calnoop"))
-    nav.append(InlineKeyboardButton("➡️" if next_enabled else " ", callback_data=f"calnav:{year:04d}-{month:02d}:+1" if next_enabled else "calnoop"))
+    nav = [
+        InlineKeyboardButton("⬅️" if prev_enabled else " ", callback_data=f"calnav:{year:04d}-{month:02d}:-1" if prev_enabled else "calnoop"),
+        InlineKeyboardButton(f"{RU_MONTHS[month-1]} {year}", callback_data="calnoop"),
+        InlineKeyboardButton("➡️" if next_enabled else " ", callback_data=f"calnav:{year:04d}-{month:02d}:+1" if next_enabled else "calnoop"),
+    ]
     rows.append(nav)
-
     rows.append([InlineKeyboardButton(x, callback_data="calnoop") for x in RU_DOW])
 
     cal = pycal.Calendar(firstweekday=0)  # Monday
@@ -1402,26 +1533,28 @@ def calendar_keyboard(year: int, month: int, min_date: date, room_key: str, logg
             if d == 0:
                 r.append(InlineKeyboardButton(" ", callback_data="calnoop"))
                 continue
-
             dt = date(year, month, d)
             if dt < min_date or dt > max_date:
                 r.append(InlineKeyboardButton("·", callback_data="calnoop"))
                 continue
-
             r.append(InlineKeyboardButton(str(d), callback_data=f"date:{iso_day(year, month, d)}"))
         rows.append(r)
 
     rows.append([InlineKeyboardButton("↩️ Назад к услугам", callback_data=f"room:{room_key}")])
     rows.append([InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")])
+
     if logged_in:
         rows.append([InlineKeyboardButton("📒 Мои записи", callback_data="my_records")])
+
     rows.append([InlineKeyboardButton("👤 Личный кабинет", callback_data="cabinet")])
     rows.append([InlineKeyboardButton("✉️ Обратная связь", callback_data="feedback")])
     rows.append([InlineKeyboardButton("🧹 Сбросить веб-сессию", callback_data="reset_web")])
+
     return kb(rows)
 
 
 # ---------------- my records (telegram view) ----------------
+
 
 def render_records_page(records: list[str], page: int, per_page: int):
     total = len(records)
@@ -1455,6 +1588,7 @@ def render_records_page(records: list[str], page: int, per_page: int):
 
 # ---------------- message router (feedback/cabinet text input) ----------------
 
+
 async def cabinet_receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cab = context.user_data.get("cabinet")
     if not cab or not cab.get("active"):
@@ -1462,19 +1596,15 @@ async def cabinet_receive_text(update: Update, context: ContextTypes.DEFAULT_TYP
 
     msg = update.message
     text = (msg.text or "").strip()
-
     mode = cab.get("mode")
     step = cab.get("step")
     data = cab.setdefault("data", {})
 
     if mode == "login":
         if step == "phone":
-            phone = normalize_phone(text)
-            if len(re.sub(r"[^0-9]", "", phone)) < 10:
-                await msg.reply_text(
-                    "Телефон некорректный. Введите в формате +7XXXXXXXXXX (например +79991234567):",
-                    reply_markup=cabinet_cancel_keyboard()
-                )
+            phone = normalize_phone_ru_to_plus7(text)
+            if not is_valid_ru_phone_plus7(phone):
+                await msg.reply_text(PHONE_BAD, reply_markup=cabinet_cancel_keyboard())
                 return
             data["phone"] = phone
             cab["step"] = "password"
@@ -1483,12 +1613,11 @@ async def cabinet_receive_text(update: Update, context: ContextTypes.DEFAULT_TYP
 
         if step == "password":
             if len(text) < 4:
-                await msg.reply_text("Пароль слишком короткий. Введите ещё раз:",
-                                     reply_markup=cabinet_cancel_keyboard())
+                await msg.reply_text("Пароль слишком короткий. Введите ещё раз:", reply_markup=cabinet_cancel_keyboard())
                 return
             data["password"] = text
-            await msg.reply_text("Пробую выполнить вход…")
 
+            await msg.reply_text("Пробую выполнить вход…")
             phone = data.get("phone")
             password = data.get("password")
 
@@ -1503,7 +1632,6 @@ async def cabinet_receive_text(update: Update, context: ContextTypes.DEFAULT_TYP
                 context.user_data["cab_verified_records"] = True
                 await msg.reply_text(f"✅ {result.message}", reply_markup=room_keyboard(True))
             else:
-                # FIX: если вход не подтверждён — НЕ показываем "Мои записи"
                 context.user_data["cab_logged_in"] = False
                 context.user_data["cab_verified_records"] = False
                 await msg.reply_text(f"❌ Не удалось подтвердить вход.\n\n{result.message}", reply_markup=room_keyboard(False))
@@ -1512,24 +1640,17 @@ async def cabinet_receive_text(update: Update, context: ContextTypes.DEFAULT_TYP
     if mode == "reg":
         if step == "name":
             if len(text) < 3:
-                await msg.reply_text("Имя и фамилия слишком короткие. Введите ещё раз:",
-                                     reply_markup=cabinet_cancel_keyboard())
+                await msg.reply_text("Имя и фамилия слишком короткие. Введите ещё раз:", reply_markup=cabinet_cancel_keyboard())
                 return
             data["name"] = text
             cab["step"] = "phone"
-            await msg.reply_text(
-                "Введите номер телефона в формате +7XXXXXXXXXX (например +79991234567):",
-                reply_markup=cabinet_cancel_keyboard()
-            )
+            await msg.reply_text(PHONE_HINT, reply_markup=cabinet_cancel_keyboard())
             return
 
         if step == "phone":
-            phone = normalize_phone(text)
-            if len(re.sub(r"[^0-9]", "", phone)) < 10:
-                await msg.reply_text(
-                    "Телефон некорректный. Введите в формате +7XXXXXXXXXX (например +79991234567):",
-                    reply_markup=cabinet_cancel_keyboard()
-                )
+            phone = normalize_phone_ru_to_plus7(text)
+            if not is_valid_ru_phone_plus7(phone):
+                await msg.reply_text(PHONE_BAD, reply_markup=cabinet_cancel_keyboard())
                 return
             data["phone"] = phone
             cab["step"] = "password"
@@ -1538,8 +1659,7 @@ async def cabinet_receive_text(update: Update, context: ContextTypes.DEFAULT_TYP
 
         if step == "password":
             if len(text) < 4:
-                await msg.reply_text("Пароль слишком короткий. Введите ещё раз:",
-                                     reply_markup=cabinet_cancel_keyboard())
+                await msg.reply_text("Пароль слишком короткий. Введите ещё раз:", reply_markup=cabinet_cancel_keyboard())
                 return
             data["password"] = text
             cab["step"] = "password2"
@@ -1548,11 +1668,10 @@ async def cabinet_receive_text(update: Update, context: ContextTypes.DEFAULT_TYP
 
         if step == "password2":
             if text != data.get("password"):
-                await msg.reply_text("Пароли не совпадают. Повторите ещё раз:",
-                                     reply_markup=cabinet_cancel_keyboard())
+                await msg.reply_text("Пароли не совпадают. Повторите ещё раз:", reply_markup=cabinet_cancel_keyboard())
                 return
-            data["password2"] = text
 
+            data["password2"] = text
             await msg.reply_text("Пробую зарегистрировать…")
 
             name = data.get("name")
@@ -1563,8 +1682,7 @@ async def cabinet_receive_text(update: Update, context: ContextTypes.DEFAULT_TYP
             worker = get_worker_for_update(update)
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(
-                EXECUTOR,
-                lambda: worker.cabinet_register(CABINET_URL, name, phone, password, password2)
+                EXECUTOR, lambda: worker.cabinet_register(CABINET_URL, name, phone, password, password2)
             )
 
             context.user_data.pop("cabinet", None)
@@ -1572,16 +1690,17 @@ async def cabinet_receive_text(update: Update, context: ContextTypes.DEFAULT_TYP
             if result.ok:
                 await msg.reply_text(
                     f"✅ Регистрация выполнена.\n\n{result.message}\n\nТеперь выполните вход, чтобы увидеть «📒 Мои записи».",
-                    reply_markup=room_keyboard(get_logged_flag(context))
+                    reply_markup=room_keyboard(get_logged_flag(context)),
                 )
             else:
                 await msg.reply_text(
                     f"❌ Не удалось зарегистрироваться.\n\n{result.message}",
-                    reply_markup=room_keyboard(get_logged_flag(context))
+                    reply_markup=room_keyboard(get_logged_flag(context)),
                 )
             return
 
     await msg.reply_text("Сначала выберите действие (Регистрация/Вход).", reply_markup=cabinet_menu_keyboard())
+
 
 async def any_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("feedback_mode"):
@@ -1597,17 +1716,22 @@ async def any_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ---------------- handlers ----------------
 
+
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Выберите комнату:", reply_markup=room_keyboard(get_logged_flag(context)))
+
 
 async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("feedback_mode"):
         await feedback_cancel(update, context)
         return
+
     if context.user_data.get("cabinet"):
         await cabinet_cancel(update, context)
         return
+
     await update.message.reply_text("Нечего отменять.", reply_markup=room_keyboard(get_logged_flag(context)))
+
 
 async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -1651,20 +1775,18 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "cab_login":
         context.user_data["cabinet"] = {"active": True, "mode": "login", "step": "phone", "data": {}}
-        # FIX: явная подсказка про формат +7XXXXXXXXXX
-        await q.edit_message_text(
-            "Вход.\n\nВведите номер телефона в формате +7XXXXXXXXXX (например +79991234567):",
-            reply_markup=cabinet_cancel_keyboard()
-        )
+        await q.edit_message_text(f"Вход.\n\n{PHONE_HINT}", reply_markup=cabinet_cancel_keyboard())
         return
 
     if data == "reset_web":
         worker = get_worker_for_update(update)
         worker.reset_driver()
-        # FIX: сброс драйвера => статус неизвестен, прячем "Мои записи" до повторной верификации входа
         context.user_data["cab_logged_in"] = False
         context.user_data["cab_verified_records"] = False
-        await q.edit_message_text("Веб-сессия сброшена (драйвер пересоздан). Профиль Chrome сохранён.", reply_markup=room_keyboard(False))
+        await q.edit_message_text(
+            "Веб-сессия сброшена (драйвер пересоздан). Профиль Chrome сохранён.",
+            reply_markup=room_keyboard(False),
+        )
         return
 
     if data == "rooms":
@@ -1687,15 +1809,10 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         res = await loop.run_in_executor(EXECUTOR, lambda: worker.get_my_records())
 
         if not res.ok:
-            # FIX: если “Мои записи” внезапно попросили авторизацию — сбрасываем verified-флаг
             if "Нужна авторизация" in (res.message or ""):
                 context.user_data["cab_logged_in"] = False
                 context.user_data["cab_verified_records"] = False
-
-            await q.edit_message_text(
-                f"❌ Не удалось получить записи.\n\n{res.message}",
-                reply_markup=room_keyboard(get_logged_flag(context))
-            )
+            await q.edit_message_text(f"❌ Не удалось получить записи.\n\n{res.message}", reply_markup=room_keyboard(get_logged_flag(context)))
             return
 
         context.user_data["records_cache"] = res.records
@@ -1722,6 +1839,42 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "calnoop":
         return
 
+    # --- NEW: обработчик выбора времени ---
+    if data.startswith("time:"):
+        # формат: time:YYYY-MM-DD:HH:MM
+        parts = data.split(":", 3)
+        if len(parts) != 4:
+            await q.answer("Некорректные данные времени")
+            return
+        _, iso, hh, mm = parts
+        picked = f"{hh}:{mm}"
+
+        context.user_data["picked_date_iso"] = iso
+        context.user_data["picked_time"] = picked
+
+        room_key = context.user_data.get("room_key", "grey")
+        titles = context.user_data.get("titles", []) or []
+        times = context.user_data.get("last_times", []) or []
+
+        try:
+            target = parse_iso_day(iso)
+            pretty_date = target.strftime("%d.%m.%Y")
+        except Exception:
+            pretty_date = iso
+
+        header = " + ".join(titles[:2])
+        if len(titles) > 2:
+            header += f" (+{len(titles)-2} ещё)"
+
+        text = (
+            f"{ROOMS[room_key]['title']}\n{header}\n\n"
+            f"Дата: {pretty_date}\n\n"
+            f"Вы выбрали: {picked}\n\n"
+            "Можно выбрать другое время:"
+        )
+        await q.edit_message_text(text, reply_markup=times_keyboard(times, iso, room_key, get_logged_flag(context), selected=picked))
+        return
+
     if data.startswith("room:"):
         room_key = data.split("room:", 1)[1]
         if room_key not in ROOMS:
@@ -1733,6 +1886,7 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["room_url"] = url
 
         await q.edit_message_text("Загружаю услуги…")
+
         worker = get_worker_for_update(update)
         loop = asyncio.get_running_loop()
         services = await loop.run_in_executor(EXECUTOR, lambda: worker.get_services(url))
@@ -1745,20 +1899,22 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             extra = [[InlineKeyboardButton("📒 Мои записи", callback_data="my_records")]] if get_logged_flag(context) else []
             await q.edit_message_text(
                 "Не удалось получить список услуг. Попробуйте ещё раз.",
-                reply_markup=kb([
-                    [InlineKeyboardButton("🔄 Обновить", callback_data=f"room:{room_key}")],
-                    [InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")],
-                    *extra,
-                    [InlineKeyboardButton("👤 Личный кабинет", callback_data="cabinet")],
-                    [InlineKeyboardButton("✉️ Обратная связь", callback_data="feedback")],
-                    [InlineKeyboardButton("🧹 Сбросить веб-сессию", callback_data="reset_web")],
-                ])
+                reply_markup=kb(
+                    [
+                        [InlineKeyboardButton("🔄 Обновить", callback_data=f"room:{room_key}")],
+                        [InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")],
+                        *extra,
+                        [InlineKeyboardButton("👤 Личный кабинет", callback_data="cabinet")],
+                        [InlineKeyboardButton("✉️ Обратная связь", callback_data="feedback")],
+                        [InlineKeyboardButton("🧹 Сбросить веб-сессию", callback_data="reset_web")],
+                    ]
+                ),
             )
             return
 
         await q.edit_message_text(
             f"{ROOMS[room_key]['title']}\n\nВыберите одну или несколько услуг:",
-            reply_markup=services_keyboard(services, context.user_data["sel"], 0, room_key, get_logged_flag(context))
+            reply_markup=services_keyboard(services, context.user_data["sel"], 0, room_key, get_logged_flag(context)),
         )
         return
 
@@ -1775,7 +1931,7 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await q.edit_message_text(
             f"{ROOMS[room_key]['title']}\n\nВыбрано услуг: {len(sel)}",
-            reply_markup=services_keyboard(services, sel, page, room_key, get_logged_flag(context))
+            reply_markup=services_keyboard(services, sel, page, room_key, get_logged_flag(context)),
         )
         return
 
@@ -1794,7 +1950,7 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await q.edit_message_text(
             f"{ROOMS[room_key]['title']}\n\nВыбрано услуг: {len(sel)}",
-            reply_markup=services_keyboard(services, sel, context.user_data.get("page", 0), room_key, get_logged_flag(context))
+            reply_markup=services_keyboard(services, sel, context.user_data.get("page", 0), room_key, get_logged_flag(context)),
         )
         return
 
@@ -1804,7 +1960,7 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["sel"] = set()
         await q.edit_message_text(
             f"{ROOMS[room_key]['title']}\n\nВыберите одну или несколько услуг:",
-            reply_markup=services_keyboard(services, context.user_data["sel"], context.user_data.get("page", 0), room_key, get_logged_flag(context))
+            reply_markup=services_keyboard(services, context.user_data["sel"], context.user_data.get("page", 0), room_key, get_logged_flag(context)),
         )
         return
 
@@ -1812,10 +1968,11 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         services = context.user_data.get("services", [])
         sel = context.user_data.get("sel", set())
         room_key = context.user_data.get("room_key", "grey")
+
         if not sel:
             await q.edit_message_text(
                 "Выберите хотя бы одну услугу.",
-                reply_markup=services_keyboard(services, sel, context.user_data.get("page", 0), room_key, get_logged_flag(context))
+                reply_markup=services_keyboard(services, sel, context.user_data.get("page", 0), room_key, get_logged_flag(context)),
             )
             return
 
@@ -1829,7 +1986,7 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await q.edit_message_text(
             "Выберите дату (прошедшие дни недоступны):",
-            reply_markup=calendar_keyboard(today.year, today.month, today, room_key, get_logged_flag(context))
+            reply_markup=calendar_keyboard(today.year, today.month, today, room_key, get_logged_flag(context)),
         )
         return
 
@@ -1842,9 +1999,10 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ym, delta = rest.rsplit(":", 1)
         y, m = parse_ym(ym)
         dm = int(delta)
-        ny, nm = ym_add(y, m, dm)
 
+        ny, nm = ym_add(y, m, dm)
         max_date = min_date + timedelta(days=MAX_DAYS_AHEAD)
+
         if (ny, nm) < (min_date.year, min_date.month):
             return
         if (ny, nm) > (max_date.year, max_date.month):
@@ -1874,7 +2032,6 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if target < today:
             await q.answer("Нельзя выбирать прошедшие дни.")
             return
-
         if target > today + timedelta(days=MAX_DAYS_AHEAD):
             await q.answer("Слишком далеко. Выберите дату ближе.")
             return
@@ -1888,39 +2045,54 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         header = " + ".join(titles[:2])
         if len(titles) > 2:
             header += f" (+{len(titles)-2} ещё)"
-
         pretty_date = target.strftime("%d.%m.%Y")
 
         if result.status == "OK" and result.times:
-            text = f"{ROOMS[room_key]['title']}\n{header}\n\nДата: {pretty_date}\n\nСвободное время:\n" + "\n".join(result.times[:30])
-        elif result.status == "EMPTY":
+            # NEW: сохраняем и показываем кнопками
+            context.user_data["last_times"] = result.times
+            context.user_data["last_date_iso"] = iso
+
+            picked = context.user_data.get("picked_time") if context.user_data.get("picked_date_iso") == iso else None
+
+            text = (
+                f"{ROOMS[room_key]['title']}\n{header}\n\n"
+                f"Дата: {pretty_date}\n\n"
+                "Выберите время:"
+            )
+            await q.edit_message_text(text, reply_markup=times_keyboard(result.times, iso, room_key, get_logged_flag(context), selected=picked))
+            return
+
+        if result.status == "EMPTY":
             text = f"{ROOMS[room_key]['title']}\n{header}\n\nДата: {pretty_date}\n\nНет свободных слотов."
         else:
             msg = result.error or "Не удалось получить актуальные слоты. Попробуйте ещё раз."
             text = f"{ROOMS[room_key]['title']}\n{header}\n\nДата: {pretty_date}\n\n{msg}"
 
         extra = [[InlineKeyboardButton("📒 Мои записи", callback_data="my_records")]] if get_logged_flag(context) else []
-
-        await q.edit_message_text(text, reply_markup=kb([
-            [InlineKeyboardButton("🔄 Обновить", callback_data=f"date:{iso}")],
-            [InlineKeyboardButton("📅 Другой день", callback_data="pick_date")],
-            [InlineKeyboardButton("↩️ Услуги", callback_data=f"room:{room_key}")],
-            [InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")],
-            *extra,
-            [InlineKeyboardButton("👤 Личный кабинет", callback_data="cabinet")],
-            [InlineKeyboardButton("✉️ Обратная связь", callback_data="feedback")],
-            [InlineKeyboardButton("🧹 Сбросить веб-сессию", callback_data="reset_web")],
-        ]))
+        await q.edit_message_text(
+            text,
+            reply_markup=kb(
+                [
+                    [InlineKeyboardButton("🔄 Обновить", callback_data=f"date:{iso}")],
+                    [InlineKeyboardButton("📅 Другой день", callback_data="pick_date")],
+                    [InlineKeyboardButton("↩️ Услуги", callback_data=f"room:{room_key}")],
+                    [InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")],
+                    *extra,
+                    [InlineKeyboardButton("👤 Личный кабинет", callback_data="cabinet")],
+                    [InlineKeyboardButton("✉️ Обратная связь", callback_data="feedback")],
+                    [InlineKeyboardButton("🧹 Сбросить веб-сессию", callback_data="reset_web")],
+                ]
+            ),
+        )
         return
 
     if data == "pick_date":
         room_key = context.user_data.get("room_key", "grey")
         min_iso = context.user_data.get("cal_min_date") or date.today().isoformat()
         min_date = parse_iso_day(min_iso)
-
         await q.edit_message_text(
             "Выберите дату (прошедшие дни недоступны):",
-            reply_markup=calendar_keyboard(min_date.year, min_date.month, min_date, room_key, get_logged_flag(context))
+            reply_markup=calendar_keyboard(min_date.year, min_date.month, min_date, room_key, get_logged_flag(context)),
         )
         return
 
@@ -1930,7 +2102,7 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    app = Application.builder().token("TOKEN").build()
+    app = Application.builder().token("8451375652:AAE-h1hS5uCE7qSvxzSSBSRMW3s2_pbUu3Y").build()
 
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("feedback", feedback_start))
@@ -1938,11 +2110,9 @@ def main():
     app.add_handler(CommandHandler("cancel", cancel_cmd))
 
     app.add_handler(CallbackQueryHandler(cb))
-
-    app.add_handler(MessageHandler(
-        (filters.TEXT | filters.PHOTO | filters.Document.ALL) & (~filters.COMMAND),
-        any_message_router
-    ))
+    app.add_handler(
+        MessageHandler((filters.TEXT | filters.PHOTO | filters.Document.ALL) & (~filters.COMMAND), any_message_router)
+    )
 
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES)
