@@ -34,6 +34,7 @@ from selenium.common.exceptions import TimeoutException, StaleElementReferenceEx
 
 from webdriver_manager.chrome import ChromeDriverManager
 
+
 # ---------------- config ----------------
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -61,7 +62,6 @@ ROOMS = {
 
 CABINET_URL = "https://bumpix.net/soundlevel"
 
-# Мои записи — несколько локалей (на них бывает "Sign in required/Потрібна авторизація...")
 MY_RECORDS_URLS = [
     "https://bumpix.net/page/client-appointments",
     "https://bumpix.net/ru/page/client-appointments",
@@ -73,16 +73,14 @@ MAX_DAYS_AHEAD = 365
 RECORDS_PAGE_SIZE = 5
 PAGE_SIZE = 20
 
-# FIX: профили Chrome (персистентная авторизация) — на каждого TG user_id отдельный профиль
 PROFILES_DIR = Path("./chrome_profiles").resolve()
 PROFILES_DIR.mkdir(parents=True, exist_ok=True)
 
-# UX: подсказки для телефона/логина
 PHONE_HINT = "Введите номер телефона (логин) в формате +7XXXXXXXXXX\nПример: +79991234567"
 PHONE_BAD = "Телефон некорректный. Формат: +7XXXXXXXXXX\nПример: +79991234567"
 
-# ---------------- telegram helpers ----------------
 
+# ---------------- telegram helpers ----------------
 
 def kb(rows):
     return InlineKeyboardMarkup(rows)
@@ -96,12 +94,10 @@ async def safe_answer(q):
 
 
 def get_logged_flag(context: ContextTypes.DEFAULT_TYPE) -> bool:
-    # показываем “Мои записи” только после ВЕРИФИЦИРОВАННОГО входа
     return bool(context.user_data.get("cab_verified_records"))
 
 
 # ---------------- feedback feature ----------------
-
 
 def feedback_keyboard():
     return kb(
@@ -187,7 +183,6 @@ async def feedback_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------- cabinet feature (login/register + my records) ----------------
 
-
 def cabinet_menu_keyboard():
     return kb(
         [
@@ -216,10 +211,6 @@ def normalize_phone(s: str) -> str:
 
 
 def normalize_phone_ru_to_plus7(s: str) -> str:
-    """
-    Приводим ввод к виду +7XXXXXXXXXX (если возможно).
-    Принимаем: +7..., 7..., 8..., 10-значный без кода.
-    """
     s = normalize_phone(s)
     digits = re.sub(r"[^0-9]", "", s)
 
@@ -230,7 +221,6 @@ def normalize_phone_ru_to_plus7(s: str) -> str:
     if len(digits) == 11 and digits.startswith("7"):
         return "+" + digits
 
-    # fallback — вернем как есть, валидация выше решит
     return s
 
 
@@ -265,11 +255,11 @@ async def cabinet_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------- selenium helpers ----------------
 
-
 def make_driver(headless: bool, profile_dir: Optional[Path]):
     opts = Options()
     if headless:
         opts.add_argument("--headless=new")
+
     opts.add_argument("--disable-gpu")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
@@ -277,6 +267,7 @@ def make_driver(headless: bool, profile_dir: Optional[Path]):
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_argument("--lang=ru-RU")
     opts.add_experimental_option("prefs", {"profile.managed_default_content_settings.images": 2})
+
     try:
         opts.page_load_strategy = "eager"
     except Exception:
@@ -355,7 +346,6 @@ function visible(el){
   const r = el.getBoundingClientRect();
   return r.width > 50 && r.height > 50;
 }
-
 const mods = Array.from(document.querySelectorAll('.modal, [role="dialog"]'));
 for (const m of mods) {
   if (visible(m)) return m;
@@ -468,13 +458,11 @@ function visible(el){
   const r = el.getBoundingClientRect();
   return r.width > 10 && r.height > 8;
 }
-
 const root = (function(){
   const mods = Array.from(document.querySelectorAll('.modal, [role="dialog"]'));
   for (const m of mods) if (visible(m)) return m;
   return document;
 })();
-
 const nodes = Array.from(root.querySelectorAll('.alert, .help-block, .text-danger, .error, .has-error'));
 const texts = [];
 for (const n of nodes) {
@@ -500,7 +488,6 @@ def verify_records_access(driver) -> bool:
 
 
 # ---------------- string utils ----------------
-
 
 def clean_spaces(s: str) -> str:
     s = (s or "").replace("\u00a0", " ").replace("\u202f", " ")
@@ -530,7 +517,6 @@ def short_raw_service_fallback(raw: str) -> str:
 
 
 # ---------------- timeBlocks helpers ----------------
-
 
 def get_timeblocks_html(driver):
     return driver.execute_script(
@@ -594,7 +580,6 @@ def wait_timeblocks_not_placeholder(driver, timeout=10):
 
 
 # ---------------- slot parsing ----------------
-
 
 def extract_times_now(driver):
     times_raw = driver.execute_script(
@@ -684,7 +669,6 @@ def parse_times_mode(driver, tries=26, sleep_sec=0.2, min_votes=2):
 
 # ---------------- services parsing ----------------
 
-
 @dataclass(frozen=True)
 class ServiceItem:
     sid: str
@@ -736,7 +720,6 @@ return out;
 
 
 # ---------------- selecting services ----------------
-
 
 def clear_all_services(driver):
     driver.execute_script(
@@ -791,6 +774,7 @@ if (label) label.classList.add('active');
         except StaleElementReferenceException:
             time.sleep(0.12)
             continue
+
     raise RuntimeError(f"Не удалось выбрать услугу {sid} (stale).")
 
 
@@ -829,7 +813,6 @@ def select_services(driver, sids):
 
 
 # ---------------- choose time ----------------
-
 
 def find_choose_time_button(driver):
     xpaths = [
@@ -874,7 +857,6 @@ def click_choose_time(driver, timeout=22):
 
 
 # ---------------- calendar/date selection (UTC safe) ----------------
-
 
 def wait_calendar_visible(driver, timeout=14):
     WebDriverWait(driver, timeout, poll_frequency=WAIT_POLL).until(
@@ -1000,7 +982,6 @@ def click_specific_date(driver, target_date: date):
 
 # ---------------- main scenario ----------------
 
-
 @dataclass(frozen=True)
 class TimesResult:
     status: str  # "OK" | "EMPTY" | "ERROR"
@@ -1048,7 +1029,6 @@ def get_times_for_selection(driver, url: str, sids, target_date: date) -> TimesR
 
 
 # ---------------- Cabinet Selenium logic ----------------
-
 
 @dataclass(frozen=True)
 class AuthResult:
@@ -1258,7 +1238,6 @@ def cabinet_open_my_records_with_driver(driver) -> RecordsResult:
 
 # ---------------- Workers: per Telegram user ----------------
 
-
 class ServicesCache:
     def __init__(self):
         self.lock = RLock()
@@ -1387,7 +1366,6 @@ def get_worker_for_update(update: Update) -> BumpixUserWorker:
 
 # ---------------- UI: rooms/services/calendar/times ----------------
 
-
 def room_keyboard(logged_in: bool):
     rows = [
         [InlineKeyboardButton(ROOMS["grey"]["title"], callback_data="room:grey")],
@@ -1441,18 +1419,26 @@ def services_keyboard(services, selected_idx_set, page: int, room_key: str, logg
     return kb(rows)
 
 
-def times_keyboard(times: list[str], iso: str, room_key: str, logged_in: bool, selected: Optional[str] = None):
+def times_keyboard(times: list[str], iso: str, room_key: str, logged_in: bool, selected_times=None):
+    """
+    Мультивыбор: каждый слот — toggle-кнопка.
+    Если выбрано >=1, появляется кнопка "К записи".
+    """
     times = (times or [])[:30]
-    rows = []
+    selected = set(selected_times or [])
 
+    rows = []
     per_row = 4
     for i in range(0, len(times), per_row):
-        chunk = times[i : i + per_row]
+        chunk = times[i:i + per_row]
         row = []
         for t in chunk:
-            label = f"✅ {t}" if selected == t else t
+            label = f"✅ {t}" if t in selected else t
             row.append(InlineKeyboardButton(label, callback_data=f"time:{iso}:{t}"))
         rows.append(row)
+
+    if selected:
+        rows.append([InlineKeyboardButton("📝 К записи", callback_data=f"to_booking:{iso}")])
 
     rows.append(
         [
@@ -1460,7 +1446,12 @@ def times_keyboard(times: list[str], iso: str, room_key: str, logged_in: bool, s
             InlineKeyboardButton("📅 Другой день", callback_data="pick_date"),
         ]
     )
-    rows.append([InlineKeyboardButton("↩️ Услуги", callback_data=f"room:{room_key}"), InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")])
+    rows.append(
+        [
+            InlineKeyboardButton("↩️ Услуги", callback_data=f"room:{room_key}"),
+            InlineKeyboardButton("↩️ Комнаты", callback_data="rooms"),
+        ]
+    )
 
     if logged_in:
         rows.append([InlineKeyboardButton("📒 Мои записи", callback_data="my_records")])
@@ -1468,6 +1459,7 @@ def times_keyboard(times: list[str], iso: str, room_key: str, logged_in: bool, s
     rows.append([InlineKeyboardButton("👤 Личный кабинет", callback_data="cabinet")])
     rows.append([InlineKeyboardButton("✉️ Обратная связь", callback_data="feedback")])
     rows.append([InlineKeyboardButton("🧹 Сбросить веб-сессию", callback_data="reset_web")])
+
     return kb(rows)
 
 
@@ -1517,9 +1509,15 @@ def calendar_keyboard(year: int, month: int, min_date: date, room_key: str, logg
 
     rows = []
     nav = [
-        InlineKeyboardButton("⬅️" if prev_enabled else " ", callback_data=f"calnav:{year:04d}-{month:02d}:-1" if prev_enabled else "calnoop"),
+        InlineKeyboardButton(
+            "⬅️" if prev_enabled else " ",
+            callback_data=f"calnav:{year:04d}-{month:02d}:-1" if prev_enabled else "calnoop",
+        ),
         InlineKeyboardButton(f"{RU_MONTHS[month-1]} {year}", callback_data="calnoop"),
-        InlineKeyboardButton("➡️" if next_enabled else " ", callback_data=f"calnav:{year:04d}-{month:02d}:+1" if next_enabled else "calnoop"),
+        InlineKeyboardButton(
+            "➡️" if next_enabled else " ",
+            callback_data=f"calnav:{year:04d}-{month:02d}:+1" if next_enabled else "calnoop",
+        ),
     ]
     rows.append(nav)
     rows.append([InlineKeyboardButton(x, callback_data="calnoop") for x in RU_DOW])
@@ -1555,7 +1553,6 @@ def calendar_keyboard(year: int, month: int, min_date: date, room_key: str, logg
 
 # ---------------- my records (telegram view) ----------------
 
-
 def render_records_page(records: list[str], page: int, per_page: int):
     total = len(records)
     pages = max(1, (total + per_page - 1) // per_page)
@@ -1586,8 +1583,7 @@ def render_records_page(records: list[str], page: int, per_page: int):
     return text[:3900], kb(rows)
 
 
-# ---------------- message router (feedback/cabinet text input) ----------------
-
+# ---------------- message router (feedback/cabinet/booking-comment) ----------------
 
 async def cabinet_receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cab = context.user_data.get("cabinet")
@@ -1703,6 +1699,47 @@ async def cabinet_receive_text(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def any_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # NEW: ожидание комментария для записи
+    if context.user_data.get("booking_comment_mode"):
+        msg = update.message
+        comment = (msg.text or "").strip() if msg else ""
+        if not comment:
+            await msg.reply_text("Пожалуйста, отправьте текстовый комментарий.")
+            return
+
+        context.user_data["booking_comment_mode"] = False
+        draft = context.user_data.get("booking_draft") or {}
+        draft["comment"] = comment
+        context.user_data["booking_draft"] = draft
+
+        room_key = draft.get("room_key", "grey")
+        date_iso = draft.get("date_iso", "")
+        times = draft.get("times", [])
+        titles = draft.get("titles", [])
+
+        types_text = ", ".join(titles) if titles else "(не выбрано)"
+        times_text = ", ".join(times) if times else "(не выбрано)"
+
+        text = (
+            "✅ Заявка на запись сформирована.\n\n"
+            f"Комната: {ROOMS[room_key]['title']}\n"
+            f"Дата: {date_iso}\n"
+            f"Тип: {types_text}\n"
+            f"Время: {times_text}\n\n"
+            f"Комментарий: {comment}"
+        )
+
+        if ADMIN_CHAT_ID:
+            try:
+                user = update.effective_user
+                who = f"{user.full_name} (@{user.username}) id={user.id}" if user else "unknown"
+                await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"📝 Новая заявка\nОт: {who}\n\n{text}")
+            except Exception:
+                pass
+
+        await msg.reply_text(text, reply_markup=room_keyboard(get_logged_flag(context)))
+        return
+
     if context.user_data.get("feedback_mode"):
         return await feedback_receive(update, context)
 
@@ -1716,7 +1753,6 @@ async def any_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ---------------- handlers ----------------
 
-
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Выберите комнату:", reply_markup=room_keyboard(get_logged_flag(context)))
 
@@ -1728,6 +1764,11 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if context.user_data.get("cabinet"):
         await cabinet_cancel(update, context)
+        return
+
+    if context.user_data.get("booking_comment_mode"):
+        context.user_data["booking_comment_mode"] = False
+        await update.message.reply_text("Отменено.", reply_markup=room_keyboard(get_logged_flag(context)))
         return
 
     await update.message.reply_text("Нечего отменять.", reply_markup=room_keyboard(get_logged_flag(context)))
@@ -1839,9 +1880,8 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "calnoop":
         return
 
-    # --- NEW: обработчик выбора времени ---
+    # --- NEW: toggle выбор времени (мультивыбор) ---
     if data.startswith("time:"):
-        # формат: time:YYYY-MM-DD:HH:MM
         parts = data.split(":", 3)
         if len(parts) != 4:
             await q.answer("Некорректные данные времени")
@@ -1849,8 +1889,17 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _, iso, hh, mm = parts
         picked = f"{hh}:{mm}"
 
-        context.user_data["picked_date_iso"] = iso
-        context.user_data["picked_time"] = picked
+        # если дата сменилась — сбросим выбор
+        if context.user_data.get("picked_times_iso") != iso:
+            context.user_data["picked_times_iso"] = iso
+            context.user_data["picked_times"] = set()
+            context.user_data.pop("booking_draft", None)
+
+        picked_set = context.user_data.setdefault("picked_times", set())
+        if picked in picked_set:
+            picked_set.remove(picked)
+        else:
+            picked_set.add(picked)
 
         room_key = context.user_data.get("room_key", "grey")
         titles = context.user_data.get("titles", []) or []
@@ -1866,13 +1915,119 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(titles) > 2:
             header += f" (+{len(titles)-2} ещё)"
 
+        chosen_sorted = sorted(picked_set, key=lambda x: (int(x.split(":")[0]), int(x.split(":")[1])))
+        chosen_line = "—" if not chosen_sorted else ", ".join(chosen_sorted)
+
         text = (
             f"{ROOMS[room_key]['title']}\n{header}\n\n"
             f"Дата: {pretty_date}\n\n"
-            f"Вы выбрали: {picked}\n\n"
-            "Можно выбрать другое время:"
+            f"Выбрано: {chosen_line}\n\n"
+            "Выберите время:"
         )
-        await q.edit_message_text(text, reply_markup=times_keyboard(times, iso, room_key, get_logged_flag(context), selected=picked))
+
+        await q.edit_message_text(
+            text,
+            reply_markup=times_keyboard(times, iso, room_key, get_logged_flag(context), selected_times=chosen_sorted),
+        )
+        return
+
+    # --- NEW: "К записи" -> подтверждение ---
+    if data.startswith("to_booking:"):
+        iso = data.split("to_booking:", 1)[1].strip()
+
+        picked_set = context.user_data.get("picked_times", set()) or set()
+        if context.user_data.get("picked_times_iso") != iso:
+            picked_set = set()
+
+        if not picked_set:
+            await q.answer("Сначала выберите хотя бы один слот.")
+            return
+
+        room_key = context.user_data.get("room_key", "grey")
+        titles = context.user_data.get("titles", []) or []
+
+        chosen_sorted = sorted(picked_set, key=lambda x: (int(x.split(":")[0]), int(x.split(":")[1])))
+        try:
+            target = parse_iso_day(iso)
+            pretty_date = target.strftime("%d.%m.%Y")
+        except Exception:
+            pretty_date = iso
+
+        types_text = "\n".join([f"- {t}" for t in titles]) if titles else "- (не выбрано)"
+        times_text = "\n".join([f"- {t}" for t in chosen_sorted])
+
+        context.user_data["booking_draft"] = {
+            "room_key": room_key,
+            "date_iso": iso,
+            "times": chosen_sorted,
+            "titles": titles,
+        }
+
+        text = (
+            "Вы подтверждаете запись?\n\n"
+            f"Комната: {ROOMS[room_key]['title']}\n"
+            f"Дата: {pretty_date}\n\n"
+            "Тип записи:\n"
+            f"{types_text}\n\n"
+            "Временные слоты:\n"
+            f"{times_text}"
+        )
+
+        await q.edit_message_text(
+            text,
+            reply_markup=kb([
+                [InlineKeyboardButton("✅ Да", callback_data="booking_yes"),
+                 InlineKeyboardButton("❌ Отменить", callback_data="booking_cancel")],
+            ]),
+        )
+        return
+
+    if data == "booking_cancel":
+        draft = context.user_data.get("booking_draft") or {}
+        iso = draft.get("date_iso") or context.user_data.get("picked_times_iso")
+        room_key = draft.get("room_key") or context.user_data.get("room_key", "grey")
+
+        times = context.user_data.get("last_times", []) or []
+        picked_set = context.user_data.get("picked_times", set()) or set()
+        chosen_sorted = sorted(picked_set, key=lambda x: (int(x.split(":")[0]), int(x.split(":")[1])))
+
+        await q.edit_message_text(
+            "Отменено. Вернулись к выбору слотов:",
+            reply_markup=times_keyboard(times, iso, room_key, get_logged_flag(context), selected_times=chosen_sorted),
+        )
+        return
+
+    if data == "booking_yes":
+        draft = context.user_data.get("booking_draft")
+        if not draft:
+            await q.answer("Черновик записи не найден. Выберите слоты заново.")
+            return
+
+        context.user_data["booking_comment_mode"] = True
+
+        await q.edit_message_text(
+            "Введите комментарий:",
+            reply_markup=kb([
+                [InlineKeyboardButton("❌ Отменить", callback_data="booking_comment_cancel")]
+            ]),
+        )
+        return
+
+    if data == "booking_comment_cancel":
+        context.user_data["booking_comment_mode"] = False
+
+        draft = context.user_data.get("booking_draft") or {}
+        iso = draft.get("date_iso") or context.user_data.get("picked_times_iso")
+        room_key = draft.get("room_key") or context.user_data.get("room_key", "grey")
+
+        times = context.user_data.get("last_times", []) or []
+        picked_set = context.user_data.get("picked_times", set()) or set()
+        chosen_sorted = sorted(picked_set, key=lambda x: (int(x.split(":")[0]), int(x.split(":")[1])))
+
+        await q.edit_message_text(
+            "Отменено. Вернулись к выбору слотов:",
+            reply_markup=times_keyboard(times, iso, room_key, get_logged_flag(context), selected_times=chosen_sorted),
+        )
         return
 
     if data.startswith("room:"):
@@ -1884,6 +2039,11 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         url = ROOMS[room_key]["url"]
         context.user_data["room_key"] = room_key
         context.user_data["room_url"] = url
+
+        # сброс "черновиков"
+        context.user_data.pop("booking_draft", None)
+        context.user_data.pop("picked_times_iso", None)
+        context.user_data.pop("picked_times", None)
 
         await q.edit_message_text("Загружаю услуги…")
 
@@ -1984,6 +2144,11 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         today = date.today()
         context.user_data["cal_min_date"] = today.isoformat()
 
+        # сброс выбора времени при смене набора услуг
+        context.user_data.pop("booking_draft", None)
+        context.user_data.pop("picked_times_iso", None)
+        context.user_data.pop("picked_times", None)
+
         await q.edit_message_text(
             "Выберите дату (прошедшие дни недоступны):",
             reply_markup=calendar_keyboard(today.year, today.month, today, room_key, get_logged_flag(context)),
@@ -2048,18 +2213,27 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pretty_date = target.strftime("%d.%m.%Y")
 
         if result.status == "OK" and result.times:
-            # NEW: сохраняем и показываем кнопками
             context.user_data["last_times"] = result.times
             context.user_data["last_date_iso"] = iso
 
-            picked = context.user_data.get("picked_time") if context.user_data.get("picked_date_iso") == iso else None
+            # при открытии новой даты сбрасываем выбранные слоты для другой даты
+            if context.user_data.get("picked_times_iso") != iso:
+                context.user_data["picked_times_iso"] = iso
+                context.user_data["picked_times"] = set()
+                context.user_data.pop("booking_draft", None)
+
+            picked_set = context.user_data.get("picked_times", set()) or set()
+            chosen_sorted = sorted(picked_set, key=lambda x: (int(x.split(":")[0]), int(x.split(":")[1])))
 
             text = (
                 f"{ROOMS[room_key]['title']}\n{header}\n\n"
                 f"Дата: {pretty_date}\n\n"
                 "Выберите время:"
             )
-            await q.edit_message_text(text, reply_markup=times_keyboard(result.times, iso, room_key, get_logged_flag(context), selected=picked))
+            await q.edit_message_text(
+                text,
+                reply_markup=times_keyboard(result.times, iso, room_key, get_logged_flag(context), selected_times=chosen_sorted),
+            )
             return
 
         if result.status == "EMPTY":
