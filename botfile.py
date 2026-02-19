@@ -110,6 +110,7 @@ async def safe_answer(q):
 
 
 def get_logged_flag(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    # считаем "авторизован", только если реально подтверждён доступ к "Мои записи"
     return bool(context.user_data.get("cab_verified_records"))
 
 
@@ -1844,14 +1845,26 @@ async def cabinet_receive_text(update: Update, context: ContextTypes.DEFAULT_TYP
             result = await loop.run_in_executor(EXECUTOR, lambda: worker.cabinet_login(CABINET_URL, phone, password))
 
             context.user_data.pop("cabinet", None)
+
             if result.ok and result.verified_records:
                 context.user_data["cab_logged_in"] = True
                 context.user_data["cab_verified_records"] = True
-                await msg.reply_text(f"✅ {result.message}", reply_markup=room_keyboard(True))
-            else:
-                context.user_data["cab_logged_in"] = False
-                context.user_data["cab_verified_records"] = False
-                await msg.reply_text(f"❌ Не удалось подтвердить вход.\n\n{result.message}", reply_markup=room_keyboard(False))
+
+                # -------- FIX: продолжить сценарий записи после входа --------
+                pending = context.user_data.pop("pending_after_login", None)
+                draft = context.user_data.get("booking_draft")
+
+                if pending and pending.get("action") == "go_comment" and draft:
+                    context.user_data["booking_comment_mode"] = True
+                    await msg.reply_text("✅ Вход успешно совершен.\n\nВведите комментарий и отправьте сообщением (Enter):")
+                    return
+
+                await msg.reply_text("✅ Вход успешно совершен.", reply_markup=room_keyboard(True))
+                return
+
+            context.user_data["cab_logged_in"] = False
+            context.user_data["cab_verified_records"] = False
+            await msg.reply_text(f"❌ Не удалось подтвердить вход.\n\n{result.message}", reply_markup=room_keyboard(False))
             return
 
     if mode == "reg":
@@ -1950,7 +1963,10 @@ async def any_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
         try:
             target = parse_iso_day(date_iso)
         except Exception:
-            await msg.reply_text("Некорректная дата в черновике. Выберите дату заново.", reply_markup=room_keyboard(get_logged_flag(context)))
+            await msg.reply_text(
+                "Некорректная дата в черновике. Выберите дату заново.",
+                reply_markup=room_keyboard(get_logged_flag(context)),
+            )
             return
 
         await msg.reply_text("Принял комментарий. Заполняю поле комментария на сайте и нажимаю «Записаться»…")
@@ -2090,16 +2106,16 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text("Сначала выполните вход через «Личный кабинет».", reply_markup=room_keyboard(False))
             return
 
-        await q.edit_message_text("Получаю список записей…")
+        await q.edit_message_text("Открываю «Мои записи»…")
         worker = get_worker_for_update(update)
         loop = asyncio.get_running_loop()
-        res = await loop.run_in_executor(EXECUTOR, lambda: worker.get_my_records())
+        res: RecordsResult = await loop.run_in_executor(EXECUTOR, lambda: worker.get_my_records())
 
         if not res.ok:
-            if "Нужна авторизация" in (res.message or ""):
+            if ("авториза" in res.message.lower()) or ("sign" in res.message.lower()):
                 context.user_data["cab_logged_in"] = False
                 context.user_data["cab_verified_records"] = False
-            await q.edit_message_text(f"❌ Не удалось получить записи.\n\n{res.message}", reply_markup=room_keyboard(get_logged_flag(context)))
+            await q.edit_message_text(f"❌ {res.message}", reply_markup=room_keyboard(get_logged_flag(context)))
             return
 
         context.user_data["records_cache"] = res.records
@@ -2110,15 +2126,13 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("rec:"):
         if not logged_in:
-            await q.edit_message_text("Сначала выполните вход через «Личный кабинет».", reply_markup=room_keyboard(False))
+            await q.edit_message_text("Сначала выполните вход.", reply_markup=room_keyboard(False))
             return
-
         page = int(data.split("rec:", 1)[1])
         recs = context.user_data.get("records_cache") or []
         if not recs:
-            await q.edit_message_text("Кэш записей пуст. Нажмите «Мои записи» ещё раз.", reply_markup=room_keyboard(get_logged_flag(context)))
+            await q.edit_message_text("Записей нет (кэш пуст).", reply_markup=room_keyboard(get_logged_flag(context)))
             return
-
         text, markup = render_records_page(recs, page, RECORDS_PAGE_SIZE)
         await q.edit_message_text(text, reply_markup=markup)
         return
@@ -2126,11 +2140,231 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "calnoop":
         return
 
-    # toggle время (мультивыбор)
+    # ---- room select ----
+    if data.startswith("room:"):
+        room_key = data.split("room:", 1)[1]
+        if room_key not in ROOMS:
+            await q.edit_message_text("Неизвестная комната.", reply_markup=room_keyboard(get_logged_flag(context)))
+            return
+
+        url = ROOMS[room_key]["url"]
+        context.user_data["room_key"] = room_key
+        context.user_data["room_url"] = url
+        context.user_data.pop("booking_draft", None)
+        context.user_data.pop("picked_times_iso", None)
+        context.user_data.pop("picked_times", None)
+
+        await q.edit_message_text("Загружаю услуги…")
+        worker = get_worker_for_update(update)
+        loop = asyncio.get_running_loop()
+        services = await loop.run_in_executor(EXECUTOR, lambda: worker.get_services(url))
+
+        context.user_data["services"] = services
+        context.user_data["sel"] = set()
+        context.user_data["page"] = 0
+
+        if not services:
+            extra = [InlineKeyboardButton("📒 Мои записи", callback_data="my_records")] if get_logged_flag(context) else []
+            await q.edit_message_text(
+                "Не удалось получить список услуг.",
+                reply_markup=kb(
+                    [
+                        [InlineKeyboardButton("↩️ Назад", callback_data=f"room:{room_key}")],
+                        [InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")],
+                        extra,
+                        [InlineKeyboardButton("👤 Личный кабинет", callback_data="cabinet")],
+                        [InlineKeyboardButton("✉️ Обратная связь", callback_data="feedback")],
+                        [InlineKeyboardButton("🧹 Сбросить веб-сессию", callback_data="reset_web")],
+                    ]
+                ),
+            )
+            return
+
+        await q.edit_message_text(
+            f"{ROOMS[room_key]['title']}\n\nВыберите услуги (можно несколько).",
+            reply_markup=services_keyboard(services, context.user_data["sel"], 0, room_key, get_logged_flag(context)),
+        )
+        return
+
+    if data.startswith("pg:"):
+        services = context.user_data.get("services")
+        room_key = context.user_data.get("room_key", "grey")
+        if not services:
+            await q.edit_message_text("Сначала выберите комнату.", reply_markup=room_keyboard(get_logged_flag(context)))
+            return
+        page = int(data.split("pg:", 1)[1])
+        context.user_data["page"] = page
+        sel = context.user_data.get("sel", set())
+        await q.edit_message_text(
+            f"{ROOMS[room_key]['title']}\n\nВыбрано: {len(sel)}",
+            reply_markup=services_keyboard(services, sel, page, room_key, get_logged_flag(context)),
+        )
+        return
+
+    if data.startswith("tgl:"):
+        services = context.user_data.get("services")
+        room_key = context.user_data.get("room_key", "grey")
+        if not services:
+            return
+        i = int(data.split("tgl:", 1)[1])
+        sel = context.user_data.setdefault("sel", set())
+        if i in sel:
+            sel.remove(i)
+        else:
+            sel.add(i)
+        await q.edit_message_text(
+            f"{ROOMS[room_key]['title']}\n\nВыбрано: {len(sel)}",
+            reply_markup=services_keyboard(services, sel, context.user_data.get("page", 0), room_key, get_logged_flag(context)),
+        )
+        return
+
+    if data == "reset":
+        services = context.user_data.get("services")
+        room_key = context.user_data.get("room_key", "grey")
+        context.user_data["sel"] = set()
+        await q.edit_message_text(
+            f"{ROOMS[room_key]['title']}\n\nВыбор сброшен.",
+            reply_markup=services_keyboard(services, context.user_data["sel"], context.user_data.get("page", 0), room_key, get_logged_flag(context)),
+        )
+        return
+
+    if data == "next":
+        services = context.user_data.get("services")
+        sel = context.user_data.get("sel", set())
+        room_key = context.user_data.get("room_key", "grey")
+        if not services:
+            await q.edit_message_text("Сначала выберите комнату.", reply_markup=room_keyboard(get_logged_flag(context)))
+            return
+        if not sel:
+            await q.edit_message_text(
+                "Выберите хотя бы одну услугу.",
+                reply_markup=services_keyboard(services, sel, context.user_data.get("page", 0), room_key, get_logged_flag(context)),
+            )
+            return
+
+        sids = [services[i].sid for i in sorted(sel)]
+        titles = [services[i].title for i in sorted(sel)]
+        context.user_data["sids"] = sids
+        context.user_data["titles"] = titles
+
+        today = date.today()
+        context.user_data["cal_min_date"] = today.isoformat()
+        context.user_data.pop("booking_draft", None)
+        context.user_data.pop("picked_times_iso", None)
+        context.user_data.pop("picked_times", None)
+
+        await q.edit_message_text("Выберите дату:", reply_markup=calendar_keyboard(today.year, today.month, today, room_key, get_logged_flag(context)))
+        return
+
+    if data.startswith("calnav:"):
+        room_key = context.user_data.get("room_key", "grey")
+        min_iso = context.user_data.get("cal_min_date") or date.today().isoformat()
+        min_date = parse_iso_day(min_iso)
+
+        _, rest = data.split("calnav:", 1)
+        ym, delta = rest.rsplit(":", 1)
+        y, m = parse_ym(ym)
+        dm = int(delta)
+
+        ny, nm = ym_add(y, m, dm)
+
+        max_date = min_date + timedelta(days=MAX_DAYS_AHEAD)
+        if (ny, nm) < (min_date.year, min_date.month):
+            return
+        if (ny, nm) > (max_date.year, max_date.month):
+            return
+
+        await q.edit_message_reply_markup(reply_markup=calendar_keyboard(ny, nm, min_date, room_key, get_logged_flag(context)))
+        return
+
+    if data.startswith("date:"):
+        room_key = context.user_data.get("room_key")
+        url = context.user_data.get("room_url")
+        sids = context.user_data.get("sids")
+        titles = context.user_data.get("titles")
+
+        if not room_key or not url or not sids:
+            await q.edit_message_text("Сначала выберите комнату и услуги.", reply_markup=room_keyboard(get_logged_flag(context)))
+            return
+
+        iso = data.split("date:", 1)[1].strip()
+        try:
+            target = parse_iso_day(iso)
+        except Exception:
+            await q.edit_message_text("Некорректная дата.", reply_markup=room_keyboard(get_logged_flag(context)))
+            return
+
+        today = date.today()
+        if target < today:
+            await q.answer("Нельзя выбрать прошедшую дату.")
+            return
+        if target > today + timedelta(days=MAX_DAYS_AHEAD):
+            await q.answer("Слишком далеко.")
+            return
+
+        await q.edit_message_text("Получаю слоты…")
+        worker = get_worker_for_update(update)
+        loop = asyncio.get_running_loop()
+        result: TimesResult = await loop.run_in_executor(EXECUTOR, lambda: worker.get_times(url, sids, target))
+
+        header = ", ".join(titles[:2]) if titles else ""
+        if titles and len(titles) > 2:
+            header = f"{header} (+{len(titles)-2})"
+
+        pretty_date = target.strftime("%d.%m.%Y")
+
+        if result.status == "OK" and result.times:
+            context.user_data["last_times"] = result.times
+            context.user_data["last_date_iso"] = iso
+
+            if context.user_data.get("picked_times_iso") != iso:
+                context.user_data["picked_times_iso"] = iso
+                context.user_data["picked_times"] = set()
+                context.user_data.pop("booking_draft", None)
+
+            picked_set = context.user_data.get("picked_times", set()) or set()
+            chosen_sorted = sorted(picked_set, key=lambda x: (int(x.split(":")[0]), int(x.split(":")[1])))
+
+            text = f"{ROOMS[room_key]['title']}\n{header}\n\nДата: {pretty_date}\nВыберите время:"
+            await q.edit_message_text(
+                text,
+                reply_markup=times_keyboard(result.times, iso, room_key, get_logged_flag(context), selected_times=chosen_sorted),
+            )
+            return
+
+        if result.status == "EMPTY":
+            text = f"{ROOMS[room_key]['title']}\n{header}\n\nДата: {pretty_date}\n\nСвободных слотов нет."
+        else:
+            msg = result.error or "Ошибка при получении слотов."
+            text = f"{ROOMS[room_key]['title']}\n{header}\n\nДата: {pretty_date}\n\n{msg}"
+
+        extra = [InlineKeyboardButton("📒 Мои записи", callback_data="my_records")] if get_logged_flag(context) else []
+        await q.edit_message_text(
+            text,
+            reply_markup=kb(
+                [
+                    [InlineKeyboardButton("🔄 Обновить", callback_data=f"date:{iso}"), InlineKeyboardButton("📅 Другой день", callback_data="pick_date")],
+                    [InlineKeyboardButton("↩️ Услуги", callback_data=f"room:{room_key}"), InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")],
+                    extra,
+                    [InlineKeyboardButton("👤 Личный кабинет", callback_data="cabinet")],
+                    [InlineKeyboardButton("✉️ Обратная связь", callback_data="feedback")],
+                    [InlineKeyboardButton("🧹 Сбросить веб-сессию", callback_data="reset_web")],
+                ]
+            ),
+        )
+        return
+
+    if data == "pick_date":
+        room_key = context.user_data.get("room_key", "grey")
+        min_iso = context.user_data.get("cal_min_date") or date.today().isoformat()
+        min_date = parse_iso_day(min_iso)
+        await q.edit_message_text("Выберите дату:", reply_markup=calendar_keyboard(min_date.year, min_date.month, min_date, room_key, get_logged_flag(context)))
+        return
+
     if data.startswith("time:"):
         parts = data.split(":", 3)
         if len(parts) != 4:
-            await q.answer("Некорректные данные времени")
+            await q.answer("Некорректные данные.")
             return
 
         _, iso, hh, mm = parts
@@ -2148,8 +2382,9 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             picked_set.add(picked)
 
         room_key = context.user_data.get("room_key", "grey")
-        titles = context.user_data.get("titles", []) or []
-        times = context.user_data.get("last_times", []) or []
+        titles = context.user_data.get("titles") or []
+        times = context.user_data.get("last_times") or []
+        chosen_sorted = sorted(picked_set, key=lambda x: (int(x.split(":")[0]), int(x.split(":")[1])))
 
         try:
             target = parse_iso_day(iso)
@@ -2157,64 +2392,32 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pretty_date = iso
 
-        header = " + ".join(titles[:2])
-        if len(titles) > 2:
-            header += f" (+{len(titles)-2} ещё)"
+        header = ", ".join(titles[:2]) if titles else ""
+        if titles and len(titles) > 2:
+            header = f"{header} (+{len(titles)-2})"
 
-        chosen_sorted = sorted(picked_set, key=lambda x: (int(x.split(":")[0]), int(x.split(":")[1])))
-        chosen_line = "—" if not chosen_sorted else ", ".join(chosen_sorted)
+        chosen_line = "(ничего не выбрано)" if not chosen_sorted else ", ".join(chosen_sorted)
 
-        text = (
-            f"{ROOMS[room_key]['title']}\n{header}\n\n"
-            f"Дата: {pretty_date}\n\n"
-            f"Выбрано: {chosen_line}\n\n"
-            "Выберите время:"
-        )
-
-        await q.edit_message_text(
-            text,
-            reply_markup=times_keyboard(times, iso, room_key, get_logged_flag(context), selected_times=chosen_sorted),
-        )
+        text = f"{ROOMS[room_key]['title']}\n{header}\n\nДата: {pretty_date}\nВыбрано: {chosen_line}\n\nВыберите время:"
+        await q.edit_message_text(text, reply_markup=times_keyboard(times, iso, room_key, get_logged_flag(context), selected_times=chosen_sorted))
         return
 
-    # "К записи" -> подтверждение (ФИКС: требуем авторизацию)
+    # ---------------- FIXED FLOW: to_booking -> if not logged in, go to login and continue to comment ----------------
     if data.startswith("to_booking:"):
         iso = data.split("to_booking:", 1)[1].strip()
-
-        if not get_logged_flag(context):
-            await q.edit_message_text(
-                "Вы еще не авторизованы.\n\nПожалуйста, выполните вход в личный кабинет.",
-                reply_markup=kb(
-                    [
-                        [InlineKeyboardButton("👤 Авторизоваться", callback_data="cabinet")],
-                        [InlineKeyboardButton("↩️ Назад к слотам", callback_data=f"date:{iso}")],
-                        [InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")],
-                    ]
-                ),
-            )
-            return
 
         picked_set = context.user_data.get("picked_times", set()) or set()
         if context.user_data.get("picked_times_iso") != iso:
             picked_set = set()
-
         if not picked_set:
-            await q.answer("Сначала выберите хотя бы один слот.")
+            await q.answer("Сначала выберите время.")
             return
 
         room_key = context.user_data.get("room_key", "grey")
-        titles = context.user_data.get("titles", []) or []
+        titles = context.user_data.get("titles") or []
         chosen_sorted = sorted(picked_set, key=lambda x: (int(x.split(":")[0]), int(x.split(":")[1])))
 
-        try:
-            target = parse_iso_day(iso)
-            pretty_date = target.strftime("%d.%m.%Y")
-        except Exception:
-            pretty_date = iso
-
-        types_text = "\n".join([f"- {t}" for t in titles]) if titles else "- (не выбрано)"
-        times_text = "\n".join([f"- {t}" for t in chosen_sorted])
-
+        # формируем черновик заранее, чтобы после логина он был
         context.user_data["booking_draft"] = {
             "room_key": room_key,
             "date_iso": iso,
@@ -2222,321 +2425,35 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "titles": titles,
         }
 
-        text = (
-            "Вы подтверждаете запись?\n\n"
-            f"Комната: {ROOMS[room_key]['title']}\n"
-            f"Дата: {pretty_date}\n\n"
-            "Тип записи:\n"
-            f"{types_text}\n\n"
-            "Временные слоты:\n"
-            f"{times_text}"
-        )
-
-        await q.edit_message_text(
-            text,
-            reply_markup=kb(
-                [
-                    [
-                        InlineKeyboardButton("✅ Да", callback_data="booking_yes"),
-                        InlineKeyboardButton("❌ Отменить", callback_data="booking_cancel"),
-                    ],
-                ]
-            ),
-        )
-        return
-
-    if data == "booking_cancel":
-        draft = context.user_data.get("booking_draft") or {}
-        iso = draft.get("date_iso") or context.user_data.get("picked_times_iso")
-        room_key = draft.get("room_key") or context.user_data.get("room_key", "grey")
-        times = context.user_data.get("last_times", []) or []
-
-        picked_set = context.user_data.get("picked_times", set()) or set()
-        chosen_sorted = sorted(picked_set, key=lambda x: (int(x.split(":")[0]), int(x.split(":")[1])))
-
-        await q.edit_message_text(
-            "Отменено. Вернулись к выбору слотов:",
-            reply_markup=times_keyboard(times, iso, room_key, get_logged_flag(context), selected_times=chosen_sorted),
-        )
-        return
-
-    if data == "booking_yes":
-        # доп. защита: авторизация могла "слететь" между шагами
         if not get_logged_flag(context):
+            context.user_data["pending_after_login"] = {"action": "go_comment"}
+            context.user_data["cabinet"] = {"active": True, "mode": "login", "step": "phone", "data": {}}
             await q.edit_message_text(
-                "Вы еще не авторизованы.\n\nПожалуйста, выполните вход в личный кабинет.",
-                reply_markup=kb(
-                    [
-                        [InlineKeyboardButton("👤 Авторизоваться", callback_data="cabinet")],
-                        [InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")],
-                    ]
-                ),
+                "Вы еще не авторизованы. Давайте выполним вход.\n\n" + PHONE_HINT,
+                reply_markup=cabinet_cancel_keyboard(),
             )
             return
 
-        draft = context.user_data.get("booking_draft")
-        if not draft:
-            await q.answer("Черновик записи не найден. Выберите слоты заново.")
-            return
-
+        # если уже авторизован — сразу просим комментарий
         context.user_data["booking_comment_mode"] = True
         await q.edit_message_text(
             "Введите комментарий и отправьте сообщением (Enter):",
-            reply_markup=kb([[InlineKeyboardButton("❌ Отменить", callback_data="booking_comment_cancel")]]),
+            reply_markup=kb([[InlineKeyboardButton("❌ Отмена", callback_data="booking_comment_cancel")]]),
         )
         return
 
     if data == "booking_comment_cancel":
         context.user_data["booking_comment_mode"] = False
-
         draft = context.user_data.get("booking_draft") or {}
         iso = draft.get("date_iso") or context.user_data.get("picked_times_iso")
         room_key = draft.get("room_key") or context.user_data.get("room_key", "grey")
-        times = context.user_data.get("last_times", []) or []
-
+        times = context.user_data.get("last_times") or []
         picked_set = context.user_data.get("picked_times", set()) or set()
         chosen_sorted = sorted(picked_set, key=lambda x: (int(x.split(":")[0]), int(x.split(":")[1])))
-
-        await q.edit_message_text(
-            "Отменено. Вернулись к выбору слотов:",
-            reply_markup=times_keyboard(times, iso, room_key, get_logged_flag(context), selected_times=chosen_sorted),
-        )
+        await q.edit_message_text("Отменено.", reply_markup=times_keyboard(times, iso, room_key, get_logged_flag(context), selected_times=chosen_sorted))
         return
 
-    if data.startswith("room:"):
-        room_key = data.split("room:", 1)[1]
-        if room_key not in ROOMS:
-            await q.edit_message_text("Неизвестная комната.", reply_markup=room_keyboard(get_logged_flag(context)))
-            return
-
-        url = ROOMS[room_key]["url"]
-        context.user_data["room_key"] = room_key
-        context.user_data["room_url"] = url
-
-        context.user_data.pop("booking_draft", None)
-        context.user_data.pop("picked_times_iso", None)
-        context.user_data.pop("picked_times", None)
-
-        await q.edit_message_text("Загружаю услуги…")
-        worker = get_worker_for_update(update)
-        loop = asyncio.get_running_loop()
-        services = await loop.run_in_executor(EXECUTOR, lambda: worker.get_services(url))
-
-        context.user_data["services"] = services
-        context.user_data["sel"] = set()
-        context.user_data["page"] = 0
-
-        if not services:
-            extra = [[InlineKeyboardButton("📒 Мои записи", callback_data="my_records")]] if get_logged_flag(context) else []
-            await q.edit_message_text(
-                "Не удалось получить список услуг. Попробуйте ещё раз.",
-                reply_markup=kb(
-                    [
-                        [InlineKeyboardButton("🔄 Обновить", callback_data=f"room:{room_key}")],
-                        [InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")],
-                        *extra,
-                        [InlineKeyboardButton("👤 Личный кабинет", callback_data="cabinet")],
-                        [InlineKeyboardButton("✉️ Обратная связь", callback_data="feedback")],
-                        [InlineKeyboardButton("🧹 Сбросить веб-сессию", callback_data="reset_web")],
-                    ]
-                ),
-            )
-            return
-
-        await q.edit_message_text(
-            f"{ROOMS[room_key]['title']}\n\nВыберите одну или несколько услуг:",
-            reply_markup=services_keyboard(services, context.user_data["sel"], 0, room_key, get_logged_flag(context)),
-        )
-        return
-
-    if data.startswith("pg:"):
-        services = context.user_data.get("services", [])
-        room_key = context.user_data.get("room_key", "grey")
-        if not services:
-            await q.edit_message_text("Список услуг пуст.", reply_markup=room_keyboard(get_logged_flag(context)))
-            return
-
-        page = int(data.split("pg:", 1)[1])
-        context.user_data["page"] = page
-        sel = context.user_data.get("sel", set())
-        await q.edit_message_text(
-            f"{ROOMS[room_key]['title']}\n\nВыбрано услуг: {len(sel)}",
-            reply_markup=services_keyboard(services, sel, page, room_key, get_logged_flag(context)),
-        )
-        return
-
-    if data.startswith("tgl:"):
-        services = context.user_data.get("services", [])
-        room_key = context.user_data.get("room_key", "grey")
-        if not services:
-            return
-
-        i = int(data.split("tgl:", 1)[1])
-        sel = context.user_data.setdefault("sel", set())
-        if i in sel:
-            sel.remove(i)
-        else:
-            sel.add(i)
-
-        await q.edit_message_text(
-            f"{ROOMS[room_key]['title']}\n\nВыбрано услуг: {len(sel)}",
-            reply_markup=services_keyboard(services, sel, context.user_data.get("page", 0), room_key, get_logged_flag(context)),
-        )
-        return
-
-    if data == "reset":
-        services = context.user_data.get("services", [])
-        room_key = context.user_data.get("room_key", "grey")
-        context.user_data["sel"] = set()
-        await q.edit_message_text(
-            f"{ROOMS[room_key]['title']}\n\nВыберите одну или несколько услуг:",
-            reply_markup=services_keyboard(services, context.user_data["sel"], context.user_data.get("page", 0), room_key, get_logged_flag(context)),
-        )
-        return
-
-    if data == "next":
-        services = context.user_data.get("services", [])
-        sel = context.user_data.get("sel", set())
-        room_key = context.user_data.get("room_key", "grey")
-
-        if not sel:
-            await q.edit_message_text(
-                "Выберите хотя бы одну услугу.",
-                reply_markup=services_keyboard(services, sel, context.user_data.get("page", 0), room_key, get_logged_flag(context)),
-            )
-            return
-
-        sids = [services[i].sid for i in sorted(sel)]
-        titles = [services[i].title for i in sorted(sel)]
-        context.user_data["sids"] = sids
-        context.user_data["titles"] = titles
-
-        today = date.today()
-        context.user_data["cal_min_date"] = today.isoformat()
-
-        context.user_data.pop("booking_draft", None)
-        context.user_data.pop("picked_times_iso", None)
-        context.user_data.pop("picked_times", None)
-
-        await q.edit_message_text(
-            "Выберите дату (прошедшие дни недоступны):",
-            reply_markup=calendar_keyboard(today.year, today.month, today, room_key, get_logged_flag(context)),
-        )
-        return
-
-    if data.startswith("calnav:"):
-        room_key = context.user_data.get("room_key", "grey")
-        min_iso = context.user_data.get("cal_min_date") or date.today().isoformat()
-        min_date = parse_iso_day(min_iso)
-
-        _, rest = data.split("calnav:", 1)
-        ym, delta = rest.rsplit(":", 1)
-        y, m = parse_ym(ym)
-        dm = int(delta)
-
-        ny, nm = ym_add(y, m, dm)
-        max_date = min_date + timedelta(days=MAX_DAYS_AHEAD)
-
-        if (ny, nm) < (min_date.year, min_date.month):
-            return
-        if (ny, nm) > (max_date.year, max_date.month):
-            return
-
-        await q.edit_message_reply_markup(reply_markup=calendar_keyboard(ny, nm, min_date, room_key, get_logged_flag(context)))
-        return
-
-    if data.startswith("date:"):
-        room_key = context.user_data.get("room_key")
-        url = context.user_data.get("room_url")
-        sids = context.user_data.get("sids", [])
-        titles = context.user_data.get("titles", [])
-
-        if not room_key or not url or not sids:
-            await q.edit_message_text("Сначала выберите комнату и услуги.", reply_markup=room_keyboard(get_logged_flag(context)))
-            return
-
-        iso = data.split("date:", 1)[1].strip()
-        try:
-            target = parse_iso_day(iso)
-        except Exception:
-            await q.edit_message_text("Некорректная дата.", reply_markup=room_keyboard(get_logged_flag(context)))
-            return
-
-        today = date.today()
-        if target < today:
-            await q.answer("Нельзя выбирать прошедшие дни.")
-            return
-        if target > today + timedelta(days=MAX_DAYS_AHEAD):
-            await q.answer("Слишком далеко. Выберите дату ближе.")
-            return
-
-        await q.edit_message_text("Ищу свободные слоты…")
-        worker = get_worker_for_update(update)
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(EXECUTOR, lambda: worker.get_times(url, sids, target))
-
-        header = " + ".join(titles[:2])
-        if len(titles) > 2:
-            header += f" (+{len(titles)-2} ещё)"
-        pretty_date = target.strftime("%d.%m.%Y")
-
-        if result.status == "OK" and result.times:
-            context.user_data["last_times"] = result.times
-            context.user_data["last_date_iso"] = iso
-
-            if context.user_data.get("picked_times_iso") != iso:
-                context.user_data["picked_times_iso"] = iso
-                context.user_data["picked_times"] = set()
-                context.user_data.pop("booking_draft", None)
-
-            picked_set = context.user_data.get("picked_times", set()) or set()
-            chosen_sorted = sorted(picked_set, key=lambda x: (int(x.split(":")[0]), int(x.split(":")[1])))
-
-            text = (
-                f"{ROOMS[room_key]['title']}\n{header}\n\n"
-                f"Дата: {pretty_date}\n\n"
-                "Выберите время:"
-            )
-
-            await q.edit_message_text(
-                text,
-                reply_markup=times_keyboard(result.times, iso, room_key, get_logged_flag(context), selected_times=chosen_sorted),
-            )
-            return
-
-        if result.status == "EMPTY":
-            text = f"{ROOMS[room_key]['title']}\n{header}\n\nДата: {pretty_date}\n\nНет свободных слотов."
-        else:
-            msg = result.error or "Не удалось получить актуальные слоты. Попробуйте ещё раз."
-            text = f"{ROOMS[room_key]['title']}\n{header}\n\nДата: {pretty_date}\n\n{msg}"
-
-        extra = [[InlineKeyboardButton("📒 Мои записи", callback_data="my_records")]] if get_logged_flag(context) else []
-        await q.edit_message_text(
-            text,
-            reply_markup=kb(
-                [
-                    [InlineKeyboardButton("🔄 Обновить", callback_data=f"date:{iso}")],
-                    [InlineKeyboardButton("📅 Другой день", callback_data="pick_date")],
-                    [InlineKeyboardButton("↩️ Услуги", callback_data=f"room:{room_key}")],
-                    [InlineKeyboardButton("↩️ Комнаты", callback_data="rooms")],
-                    *extra,
-                    [InlineKeyboardButton("👤 Личный кабинет", callback_data="cabinet")],
-                    [InlineKeyboardButton("✉️ Обратная связь", callback_data="feedback")],
-                    [InlineKeyboardButton("🧹 Сбросить веб-сессию", callback_data="reset_web")],
-                ]
-            ),
-        )
-        return
-
-    if data == "pick_date":
-        room_key = context.user_data.get("room_key", "grey")
-        min_iso = context.user_data.get("cal_min_date") or date.today().isoformat()
-        min_date = parse_iso_day(min_iso)
-        await q.edit_message_text(
-            "Выберите дату (прошедшие дни недоступны):",
-            reply_markup=calendar_keyboard(min_date.year, min_date.month, min_date, room_key, get_logged_flag(context)),
-        )
-        return
+    await q.answer("Неизвестная команда.")
 
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -2550,10 +2467,12 @@ def main():
     app.add_handler(CommandHandler("feedback", feedback_start))
     app.add_handler(CommandHandler("cabinet", cabinet_start))
     app.add_handler(CommandHandler("cancel", cancel_cmd))
+
     app.add_handler(CallbackQueryHandler(cb))
-    app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO | filters.Document.ALL) & (~filters.COMMAND), any_message_router))
+    app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.Document.ALL & ~filters.COMMAND, any_message_router))
 
     app.add_error_handler(on_error)
+
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
